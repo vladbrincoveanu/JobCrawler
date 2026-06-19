@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+.turbo/
+
+# Testing
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+.playwright/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local env (never commit secrets)
+.env
+.env*.local
+
+# Vercel
+.vercel/
+
+# Generated artifacts (regenerable from source)
+graphify-out/
+
+# Local Claude state — personal, not for version control
+.claude/handoffs/
+.claude/checkpoints/
+.claude/relentless-status-*.md
+.claude/settings.local.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
