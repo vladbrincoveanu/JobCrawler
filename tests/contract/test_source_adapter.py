@@ -10,6 +10,9 @@ def test_source_adapter_is_protocol():
 
 def test_source_adapter_required_members():
     members = {name for name, _ in inspect.getmembers(SourceAdapter)}
+    # Protocol annotations live in __annotations__ / __protocol_attrs__ (Py3.12+)
+    members |= getattr(SourceAdapter, "__annotations__", {}).keys()
+    members |= set(getattr(SourceAdapter, "__protocol_attrs__", set()))
     assert "name" in members
     assert "search" in members
     assert "fetch_detail" in members
