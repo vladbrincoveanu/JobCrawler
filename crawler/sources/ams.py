@@ -3,6 +3,7 @@ tests use FakeBrowserContext (DI). Spec § AMS adapter."""
 import asyncio
 import random
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from typing import AsyncIterator
 from bs4 import BeautifulSoup
 from crawler import config
@@ -62,6 +63,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _build_absolute_url(href: str) -> str:
+    """Resolve href to an absolute URL using AMS_BASE_URL's origin.
+
+    href from search results is a server-relative path (e.g. '/public/jobs/123').
+    We compose origin + href so we never double up the path prefix.
+    """
+    parsed = urlparse(config.AMS_BASE_URL)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if href.startswith("/"):
+        return f"{origin}{href}"
+    return f"{origin}/{href}"
+
+
 def _jitter_seconds() -> float:
     return random.uniform(0, config.AMS_REQUEST_JITTER_SECONDS)
 
@@ -82,7 +96,7 @@ def _parse_search_card(card, *, fetched_at: datetime) -> RawJob:
     return RawJob(
         source="ams",
         source_id=source_id,
-        url=f"{config.AMS_BASE_URL.rstrip('/')}{href}" if href.startswith("/") else href,
+        url=_build_absolute_url(href),
         title=title,
         company=company.get_text(strip=True) if company else None,
         location=location.get_text(strip=True) if location else None,

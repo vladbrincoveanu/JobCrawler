@@ -4,6 +4,7 @@ Grill-me amendment 1: lives in tests/fakes/, NOT crawler/browser.py.
 Keeps Playwright import chain out of test path.
 """
 from typing import Any
+from bs4 import BeautifulSoup
 from crawler import config
 from crawler.browser import _detect_anti_bot
 from crawler.exceptions import SPAWaitTimeout
@@ -35,10 +36,11 @@ class FakeBrowserContext:
             raise SPAWaitTimeout(f"no fixture for {url} (no selector met)")
         html = self._fixtures[url]
         # If a wait_selector is requested, only return HTML if it contains that selector
-        if wait_selector and wait_selector not in html:
+        if wait_selector and not BeautifulSoup(html, "html.parser").select(wait_selector):
             raise SPAWaitTimeout(f"selector {wait_selector!r} not in {url}")
         # Run anti-bot detection on normal responses too (captcha can be in body)
         _detect_anti_bot(title="Jobs - AMS", body=html, url=url)
+        self._last_html = html
         return html
 
     async def extract_html(self) -> str:
