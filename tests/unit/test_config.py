@@ -29,3 +29,11 @@ def test_retry_backoffs():
 
 def test_coverage_gate():
     assert config.COVERAGE_GATE == 0.90
+
+
+def test_ua_pool_size_matches_constant():
+    assert len(config.UA_POOL) == config.BROWSER_UA_POOL_SIZE
+
+
+def test_ua_pool_has_no_duplicates():
+    assert len(set(config.UA_POOL)) == len(config.UA_POOL)
