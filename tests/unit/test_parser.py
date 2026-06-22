@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from bs4 import BeautifulSoup
 import pytest
 from crawler.parser import select_text, select_attr, extract_jsonld, parse_iso_date
@@ -46,7 +46,7 @@ def test_extract_jsonld_missing_raises_schema_changed():
 
 def test_parse_iso_date_with_z():
     dt = parse_iso_date("2026-06-22T10:00:00Z")
-    assert dt == datetime(2026, 6, 22, 10, 0, 0)
+    assert dt == datetime(2026, 6, 22, 10, 0, 0, tzinfo=timezone.utc)
 
 
 def test_parse_iso_date_with_offset():
