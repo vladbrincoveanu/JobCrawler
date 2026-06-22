@@ -73,6 +73,7 @@ jobcrawler/
     exceptions.py          # CrawlerError hierarchy
     http.py                # httpx async client (UA pool, throttle, retry, backoff) — future sources
     browser.py             # Playwright wrapper: cookie store, UA pool, SPA wait, anti-bot detect — AMS
+                            #   + BrowserContext Protocol, PlaywrightBrowserContext (real), FakeBrowserContext (test)
     models.py              # pydantic: JobQuery, RawJob, NormalizedJob
     parser.py              # generic HTML/JSON parsing helpers (per-source logic lives in sources/*.py)
     pipeline.py            # orchestrator: run_source(), run()
@@ -199,10 +200,10 @@ class NormalizedJob(BaseModel):
 - **Size target:** ~200 lines
 
 ### Module: `crawler.browser`
-- **Responsibility:** Playwright wrapper — cookie store, UA pool, SPA wait, anti-bot detection.
-- **Interface:** `class BrowserContext` (Protocol); `class PlaywrightBrowserContext` (real impl, `async with`-managed); `class FakeBrowserContext` (test impl, returns fixture HTML); methods: `goto(url, wait_selector)`, `extract_html()`, `cookies`
+- **Responsibility:** Playwright wrapper — cookie store, UA pool, SPA wait, anti-bot detection. Defines `BrowserContext` Protocol + real/test implementations.
+- **Interface:** `class BrowserContext(Protocol)`; `class PlaywrightBrowserContext` (real impl, `async with`-managed); `class FakeBrowserContext` (test impl in same module, returns fixture HTML); methods: `goto(url, wait_selector)`, `extract_html()`, `cookies`
 - **Dependencies:** `playwright.async_api`, `crawler.exceptions`, `crawler.config`
-- **Size target:** ~250 lines
+- **Size target:** ~300 lines (incl. FakeBrowserContext)
 
 ### Module: `crawler.http` (future sources)
 - **Responsibility:** Shared httpx async client — UA pool, throttle, retry, backoff.
@@ -423,7 +424,7 @@ async def run(adapters, query, run_id):
 ### Browser wrapper (`crawler/browser.py`) — AMS
 
 - Playwright async API, Chromium headless
-- **Cookie store**: persist `SM2_SESSION` (and any `ams.at` cookies) to `data/session_ams.json` (gitignored). TTL 24h — refresh if older.
+- **Cookie store**: persist `SM2_SESSION` (and any `ams.at` cookies) to `data/session_ams.json` (gitignored). Refresh on session start + on `CookieExpired` signal (no time-based TTL — server-driven expiry only).
 - **UA pool**: 10 realistic desktop Chrome/Firefox/Edge strings, round-robin per session (not per request — minimize fingerprint churn)
 - **Page waiter**: `await page.wait_for_selector(selector, timeout=BROWSER_TIMEOUT_MS)`. No `networkidle` (analytics/tracking hangs).
 - **Anti-bot detector**: returns typed exception on `title=='captcha'`, `403`, body contains `access denied`, URL ends with `/verify`. No auto-solving.
@@ -436,7 +437,7 @@ async def run(adapters, query, run_id):
 - **Stack**: Playwright async API via `crawler/browser.py`
 - `search()`: paginated `/jobs` browser navigation; waits for `[data-testid="job-card"]`; yields `RawJob` per card
 - `fetch_detail()`: per-job detail page; waits for `[data-testid="job-detail"]`; returns `NormalizedJob` with `content_hash`
-- **Session**: extracts `SM2_SESSION` from first navigation response, persists to `data/session_ams.json` (gitignored), reuses if <24h old
+- **Session**: extracts `SM2_SESSION` from first navigation response, persists to `data/session_ams.json` (gitignored). Refresh on session start (always) + on `CookieExpired` signal. No TTL clock.
 - **Throttle**: 10 req/min (conservative start, tune via `AMS_RATE_LIMIT_PER_MIN` config), ±2s random jitter between requests
 - **Anti-bot**: on captcha/403/access-denied → retry 1× after 60s → circuit-break; stderr alert (no captcha solving — ethical + ToS)
 - **SPA wait**: 15s selector timeout, 1 retry on timeout (likely transient)
@@ -475,12 +476,13 @@ RETRY_BACKOFF_SLOW: tuple[int, ...] = (1, 5, 15)  # NetworkError
 
 # Browser (AMS)
 BROWSER_TIMEOUT_MS: int = 15_000                   # SPA selector wait
-BROWSER_SESSION_TTL_HOURS: int = 24                # SM2_SESSION cookie persistence
 BROWSER_RETRIES_ON_TIMEOUT: int = 1                # SPA wait retry
 BROWSER_CAPTCHA_BACKOFF_SECONDS: int = 60          # anti-bot retry
 BROWSER_UA_POOL_SIZE: int = 10                     # rotating realistic UAs
 AMS_RATE_LIMIT_PER_MIN: int = 10                   # conservative start
 AMS_REQUEST_JITTER_SECONDS: int = 2                # ±random jitter
+AMS_CAPTCHA_TUNE_THRESHOLD: float = 0.001          # captchas per request; tune rate up if <3 runs below
+AMS_CAPTCHA_TUNE_RUNS: int = 3                     # consecutive runs needed to tune rate up
 
 # Testing
 COVERAGE_GATE: float = 0.90  # AMS-only small surface, high target
