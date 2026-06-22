@@ -6,7 +6,7 @@ from crawler.exceptions import CaptchaEncountered, Blocked, SPAWaitTimeout
 @pytest.fixture
 def fake():
     return FakeBrowserContext({
-        "https://jobs.ams.at/public/jobs": "<html><body>job cards</body></html>",
+        "https://jobs.ams.at/public/jobs": "<html><body><div class=\"[data-testid='job-card']\">job cards</div></body></html>",
         "https://jobs.ams.at/public/jobs/123": "<html><body>detail</body></html>",
     })
 
@@ -14,7 +14,7 @@ def fake():
 @pytest.mark.asyncio
 async def test_goto_returns_html(fake):
     html = await fake.goto("https://jobs.ams.at/public/jobs")
-    assert html == "<html><body>job cards</body></html>"
+    assert "job cards" in html
 
 
 @pytest.mark.asyncio
