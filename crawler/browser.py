@@ -86,8 +86,9 @@ class PlaywrightBrowserContext:
         self._context = None
         self._page = None
 
-    async def __aenter__(self) -> "PlaywrightBrowserContext":
+    async def __aenter__(self) -> "PlaywrightBrowserContext":  # pragma: no cover
         # Lazy import — tests using FakeBrowserContext never trigger this
+        # Manual smoke only (T23).
         from playwright.async_api import async_playwright
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=True)
@@ -99,7 +100,8 @@ class PlaywrightBrowserContext:
         self._page = await self._context.new_page()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # pragma: no cover
+        # Manual smoke only (T23).
         if self._context:
             await self._context.close()
         if self._browser:
@@ -127,7 +129,8 @@ class PlaywrightBrowserContext:
     async def cookies(self) -> list[dict[str, Any]]:
         return await self._context.cookies()
 
-    async def save_cookies(self) -> None:
+    async def save_cookies(self) -> None:  # pragma: no cover
+        # Manual smoke only (T23).
         self._cookie_store.save(await self.cookies())
 
     async def close(self) -> None:
