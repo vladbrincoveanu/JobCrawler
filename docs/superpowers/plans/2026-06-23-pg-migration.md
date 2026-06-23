@@ -1213,6 +1213,8 @@ git commit -m "feat(seed): seed_demo_data.py — PG inserts (5 jobs + 2 runs + 1
 **Files:**
 - Rewrite: `dashboard/lib/db.ts`
 
+**Pre-req:** `cd dashboard && npm install pg @types/pg` (full removal of `better-sqlite3` happens in Task 14; for this task we just need `pg` importable so the tsc check passes).
+
 - [ ] **Step 1: Rewrite `db.ts`**
 
 ```typescript
