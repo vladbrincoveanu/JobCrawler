@@ -10,12 +10,13 @@ import re
 from pathlib import Path
 
 import psycopg
+from psycopg.rows import dict_row
 
 VERSION_PATTERN = re.compile(r"^V(\d+)__(.+)\.sql$")
 
 
 def _applied_versions(conn: psycopg.Connection) -> set[int]:
-    with conn.cursor() as cur:
+    with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT version FROM schema_migrations")
         return {row["version"] for row in cur.fetchall()}
 
