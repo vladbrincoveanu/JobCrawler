@@ -1,123 +1,173 @@
-"""CRUD: jobs (upsert with dedup), crawl_runs, crawl_errors."""
-from datetime import datetime, timezone
-from typing import Literal
-import sqlite3
+"""Typed CRUD over jobs, runs, sources, errors (PostgreSQL).
 
-from crawler.models import NormalizedJob
+All functions take a `psycopg.Connection`. Callers manage
+transactions via `with conn.transaction():` blocks.
+"""
+from __future__ import annotations
 
+from typing import Any
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+import psycopg
+from psycopg.types.json import Jsonb
 
-
-def upsert_job(conn: sqlite3.Connection, job: NormalizedJob) -> Literal["inserted", "updated"]:
-    """INSERT or UPDATE on (source, source_id). Returns action.
-
-    Uses INSERT OR IGNORE + UPDATE fallback because SQLite lacks the
-    PostgreSQL `xmax = 0` RETURNING trick.
-    """
-    now = _now()
-    raw_html = job.raw_html
-    cur = conn.execute(
-        """
-        INSERT OR IGNORE INTO jobs (source, source_id, url, title, company, location,
-                                    description, salary, employment_type, posted_at,
-                                    content_hash, raw_html, first_seen_at, last_seen_at, is_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """,
-        (
-            job.source, job.source_id, str(job.url), job.title, job.company, job.location,
-            job.description, job.salary, job.employment_type,
-            job.posted_at.isoformat() if job.posted_at else None,
-            job.content_hash, raw_html, now, now,
-        ),
-    )
-    if cur.rowcount == 1:
-        return "inserted"
-    conn.execute(
-        """
-        UPDATE jobs SET
-          title=?,
-          description=?,
-          salary=?,
-          employment_type=?,
-          posted_at=?,
-          content_hash=?,
-          raw_html=COALESCE(?, raw_html),
-          last_seen_at=?
-        WHERE source=? AND source_id=?
-        """,
-        (
-            job.title, job.description, job.salary, job.employment_type,
-            job.posted_at.isoformat() if job.posted_at else None,
-            job.content_hash, raw_html, now,
-            job.source, job.source_id,
-        ),
-    )
-    return "updated"
+from crawler.storage.dedup import content_hash
 
 
-def get_by_hash(conn: sqlite3.Connection, hash_val: str) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM jobs WHERE content_hash = ? LIMIT 1", (hash_val,)
-    ).fetchone()
+# ---------- sources ----------
+
+def upsert_source(conn: psycopg.Connection, name: str, *, enabled: bool = True,
+                  rate_limit_per_min: int = 30) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO sources (name, enabled, rate_limit_per_min)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (name) DO UPDATE
+              SET enabled = EXCLUDED.enabled,
+                  rate_limit_per_min = EXCLUDED.rate_limit_per_min
+        """, (name, enabled, rate_limit_per_min))
 
 
-def list_jobs(conn: sqlite3.Connection, limit: int = 100, source: str | None = None) -> list[sqlite3.Row]:
+def get_source(conn: psycopg.Connection, name: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM sources WHERE name = %s", (name,))
+        return cur.fetchone()
+
+
+# ---------- runs ----------
+
+def start_run(conn: psycopg.Connection, source: str) -> int:
+    """Begin a run, return its id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO runs (source, status) VALUES (%s, 'running') RETURNING id",
+            (source,),
+        )
+        return cur.fetchone()["id"]
+
+
+def finish_run(conn: psycopg.Connection, run_id: int, *,
+               status: str, jobs_found: int, jobs_new: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE runs SET status = %s, ended_at = now(),
+                            jobs_found = %s, jobs_new = %s
+            WHERE id = %s
+        """, (status, jobs_found, jobs_new, run_id))
+
+
+def record_error(conn: psycopg.Connection, run_id: int, *,
+                 stage: str, message: str, context: dict[str, Any] | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO run_errors (run_id, stage, message, context)
+            VALUES (%s, %s, %s, %s)
+        """, (run_id, stage, message, Jsonb(context) if context else None))
+
+
+def list_runs(conn: psycopg.Connection, source: str | None = None,
+              limit: int = 50) -> list[dict]:
+    sql = "SELECT * FROM runs"
+    args: tuple = ()
     if source:
-        return conn.execute(
-            "SELECT * FROM jobs WHERE source = ? ORDER BY last_seen_at DESC LIMIT ?",
-            (source, limit),
-        ).fetchall()
-    return conn.execute(
-        "SELECT * FROM jobs ORDER BY last_seen_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+        sql += " WHERE source = %s"
+        args = (source,)
+    sql += " ORDER BY started_at DESC LIMIT %s"
+    args = args + (limit,)
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        return list(cur.fetchall())
 
 
-def start_run(conn: sqlite3.Connection, source: str, status: str = "running") -> int:
-    cur = conn.execute(
-        "INSERT INTO crawl_runs (source, started_at, status) VALUES (?, ?, ?)",
-        (source, _now(), status),
-    )
-    return cur.lastrowid
+def get_run_errors(conn: psycopg.Connection, run_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM run_errors WHERE run_id = %s ORDER BY occurred_at DESC",
+            (run_id,),
+        )
+        return list(cur.fetchall())
 
 
-def finalize_run(
-    conn: sqlite3.Connection,
-    run_id: int,
-    status: str,
-    counters: dict[str, int],
-) -> None:
-    conn.execute(
-        """
-        UPDATE crawl_runs
-        SET finished_at=?, status=?,
-            jobs_found=?, jobs_inserted=?, jobs_updated=?, errors_count=?
-        WHERE id=?
-        """,
-        (
-            _now(), status,
-            counters.get("found", 0),
-            counters.get("inserted", 0),
-            counters.get("updated", 0),
-            counters.get("errors", 0),
-            run_id,
-        ),
-    )
+# ---------- jobs ----------
+
+def upsert_job(conn: psycopg.Connection, *,
+               source: str, source_id: str, url: str, title: str,
+               company: str | None, location: str | None,
+               description: str | None, raw_payload: dict | None = None) -> dict:
+    """Insert or update a job. Returns row dict with `created: bool`."""
+    h = content_hash(title, company, location)
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO jobs (source, source_id, url, title, company, location,
+                              description, content_hash, raw_payload)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (source, source_id) DO UPDATE
+              SET url = EXCLUDED.url,
+                  title = EXCLUDED.title,
+                  company = EXCLUDED.company,
+                  location = EXCLUDED.location,
+                  description = EXCLUDED.description,
+                  content_hash = EXCLUDED.content_hash,
+                  last_seen_at = now(),
+                  raw_payload = EXCLUDED.raw_payload
+            RETURNING id, (xmax = 0) AS created, *
+        """, (source, source_id, url, title, company, location, description, h,
+              Jsonb(raw_payload) if raw_payload else None))
+        row = cur.fetchone()
+        return dict(row)
 
 
-def log_error(
-    conn: sqlite3.Connection,
-    run_id: int,
-    source: str,
-    url: str | None,
-    error_type: str,
-    error_message: str,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO crawl_errors (run_id, source, url, error_type, error_message, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (run_id, source, url, error_type, error_message, _now()),
-    )
+def get_by_hash(conn: psycopg.Connection, h: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE content_hash = %s", (h,))
+        return cur.fetchone()
+
+
+def list_jobs(conn: psycopg.Connection, *,
+              source: str | None = None, limit: int = 100,
+              offset: int = 0) -> list[dict]:
+    sql = "SELECT * FROM jobs"
+    args: list = []
+    if source:
+        sql += " WHERE source = %s"
+        args.append(source)
+    sql += " ORDER BY last_seen_at DESC LIMIT %s OFFSET %s"
+    args.extend([limit, offset])
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(args))
+        return list(cur.fetchall())
+
+
+def get_job(conn: psycopg.Connection, job_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        return cur.fetchone()
+
+
+# ---------- stats ----------
+
+def get_stats(conn: psycopg.Connection) -> dict:
+    """Stats for dashboard overview page."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM jobs")
+        jobs_total = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM runs WHERE status = 'success'")
+        runs_success = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM runs WHERE status = 'failed'")
+        runs_failed = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM run_errors")
+        errors_total = cur.fetchone()["n"]
+        cur.execute("SELECT source, COUNT(*) AS n FROM jobs GROUP BY source")
+        by_source = {row["source"]: row["n"] for row in cur.fetchall()}
+        cur.execute("""
+            SELECT date_trunc('day', last_seen_at)::date AS day, COUNT(*) AS n
+            FROM jobs GROUP BY day ORDER BY day DESC LIMIT 7
+        """)
+        recent = list(cur.fetchall())
+    return {
+        "jobs_total": jobs_total,
+        "runs_success": runs_success,
+        "runs_failed": runs_failed,
+        "errors_total": errors_total,
+        "by_source": by_source,
+        "recent_days": recent,
+    }
