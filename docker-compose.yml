@@ -1,0 +1,21 @@
+# docker-compose.yml — local PG for dev + tests
+services:
+  postgres:
+    image: pgvector/pgvector:pg16   # pgvector preinstalled
+    container_name: jobcrawler-pg
+    environment:
+      POSTGRES_USER: jobcrawler
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: jobcrawler
+    ports:
+      - "5433:5432"   # host 5433 → container 5432 (host 5432 occupied by knowledgeforge-postgres)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobcrawler -d jobcrawler"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:
