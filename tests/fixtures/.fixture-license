@@ -1,0 +1,15 @@
+# Test fixture license
+
+Fixtures in this directory are recorded HTML from ams.at (Austrian Public
+Employment Service) for the sole purpose of unit/integration testing the
+JobCrawler pipeline.
+
+Per grill-me amendment 8: job descriptions are stripped via
+`scripts/record_fixtures.py:strip_descriptions()` before commit. Only
+structural HTML (card layout, selectors, attribute names) is retained.
+
+Re-record sparingly. AMS ToS permits personal use scraping; redistribution
+of stripped structural HTML is a gray area — keep fixtures minimal.
+
+Fixture mtime warning: tests print a warning if any fixture is >30 days
+old (spec § Testing Strategy).

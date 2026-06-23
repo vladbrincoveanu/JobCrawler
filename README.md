@@ -1,43 +1,60 @@
 # JobCrawler
 
-> ⚠️ TODO — one-paragraph description. What does this project do, who is it for?
+Job listings crawler + storage. Sub-project 1 of 4 (see [spec](docs/superpowers/specs/2026-06-21-jobcrawler-crawler-storage-design.md)).
 
-## Status
-
-🚧 **Initial bootstrap.** Repo structure, stack, and tooling under construction.
-
-## Getting started
+## Quickstart
 
 ```bash
-# Install dependencies
-# TODO — fill in once package manager is chosen
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+playwright install chromium
 
-# Run dev server
-# TODO
+# Dry-run AMS
+python scripts/crawl.py --source=ams --limit=10 --dry-run
 
-# Run tests
-# TODO
+# Real crawl
+python scripts/crawl.py --source=ams --limit=50
+
+# Inspect DB
+python scripts/inspect_db.py
 ```
 
-## Project layout
+## Architecture
 
-> ⚠️ TODO — document once the architecture is decided.
+Crawler pipeline that fetches job listings from sources, normalizes +
+dedupes them, and persists to a local SQLite DB. Sub-project 1 ships AMS
+only (Playwright browser adapter). Other sources (Karriere.at, Willhaben,
+LinkedIn) are sub-projects 1.1+.
 
 ```
-JobCrawler/
-├── .claude/          # Claude Code skills + project rules
-├── AGENTS.md         # Cross-tool agent instructions
-├── CLAUDE.md         # Claude-Code-specific project notes
-├── README.md         # This file
-└── ...
+scripts/crawl.py → crawler.pipeline → AmsAdapter → BrowserContext (Playwright) → SQLite
 ```
 
-## Contributing
+## Tests
 
-- Branch from `main`: `git checkout -b relentless/<slug>`
-- Conventional commits: `type: subject`
-- Open a PR when the relentless branch is green
+```bash
+pytest                    # full suite
+pytest tests/unit/        # unit only
+pytest tests/integration/ # integration
+pytest --cov=crawler      # with coverage
+```
+
+Coverage gate: 90% (see `crawler/config.py:COVERAGE_GATE`).
+
+## Sub-projects
+
+| # | Name | Status |
+|---|------|--------|
+| 1 | Crawler + Storage (AMS) | this repo |
+| 1.1 | Karriere.at adapter | deferred |
+| 1.2 | Willhaben.at/jobs adapter | deferred |
+| 1.3+ | LinkedIn adapter | deferred |
+| 2 | Enrichment (company, financial, reviews) | deferred |
+| 3 | Dashboard (Next.js) | deferred |
+| 4 | Scheduler (cron, env config, alerts) | deferred |
+
+See `docs/superpowers/specs/2026-06-21-jobcrawler-crawler-storage-design.md` for the full design.
 
 ## License
 
-> ⚠️ TODO — pick a license (MIT, Apache-2.0, proprietary, etc.) and add `LICENSE` file.
+Proprietary. All rights reserved.

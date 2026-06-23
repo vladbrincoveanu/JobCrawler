@@ -29,8 +29,15 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.coverage
+htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+# JobCrawler runtime
+data/jobs.db
+data/jobs.db-*
+data/session_ams.json
 
 # Local env (never commit secrets)
 .env
