@@ -13,6 +13,8 @@
 
 **Pre-flight grill-me note:** User pushed back on over-grilling micro-decisions during brainstorm. Plan uses sensible defaults throughout — psycopg+pg, raw SQL (no ORM), docker-compose, ephemeral PG schema per test. Revise only if a default blocks a step.
 
+**Port override (global, applied 2026-06-23 during Task 1):** Host port 5432 is occupied on this dev machine by `knowledgeforge-postgres` (another project). All JobCrawler PG references use **port 5433** instead. Host port 3010 is occupied by `knowledgeforge-ui`. All JobCrawler dashboard references use **port 3011** instead. This is a port-only deviation; architecture is unchanged. Implemented via `docker-compose.yml` mapping `5433:5432` (host 5433 → container 5432, where PG actually listens) and `npx next start --port 3011`.
+
 ---
 
 ## Task 1: docker-compose.yml + .env.example — PG service
@@ -35,7 +37,7 @@ services:
       POSTGRES_PASSWORD: dev
       POSTGRES_DB: jobcrawler
     ports:
-      - "5432:5432"
+      - "5433:5432"   # host 5433 → container 5432 (host 5432 occupied by knowledgeforge-postgres)
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -55,7 +57,7 @@ Replace `.env.example` contents:
 ```bash
 # JobCrawler — copy to .env, never commit
 # Postgres connection (local docker-compose defaults)
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler
 
 # Sub-project 1 (AMS crawler)
 AMS_BASE_URL=https://jobs.ams.at/public/
@@ -289,7 +291,7 @@ import os
 
 # Postgres connection (read from env)
 DATABASE_URL: str = os.environ.get(
-    "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5432/jobcrawler"
+    "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
 )
 
 # AMS crawler
@@ -304,7 +306,7 @@ PG_STATEMENT_TIMEOUT_MS: int = int(os.environ.get("PG_STATEMENT_TIMEOUT_MS", "30
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from crawler.storage.db import connect
 conn = connect()
 with conn.cursor() as cur:
@@ -405,7 +407,7 @@ Run:
 ```bash
 docker compose exec postgres dropdb -U jobcrawler jobcrawler --if-exists
 docker compose exec postgres createdb -U jobcrawler jobcrawler
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from pathlib import Path
 from crawler.storage.db import connect
 from crawler.storage.migrations.runner import migrate
@@ -423,7 +425,7 @@ Expected: `applied: [1]` printed. `schema_migrations` row shows `1 | ... | initi
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from pathlib import Path
 from crawler.storage.db import connect
 from crawler.storage.migrations.runner import migrate
@@ -509,7 +511,7 @@ def find_by_hash(conn: psycopg.Connection, hash_value: str) -> dict | None:
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from crawler.storage.db import connect
 from crawler.storage.dedup import content_hash, find_by_hash
 h = content_hash('Senior Developer', 'AMS', 'Wien')
@@ -718,7 +720,7 @@ def get_stats(conn: psycopg.Connection) -> dict:
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from crawler.storage.db import connect
 from crawler.storage.repository import (
     upsert_source, start_run, finish_run, upsert_job, list_jobs, get_stats
@@ -791,7 +793,7 @@ from crawler.storage.migrations.runner import migrate
 
 
 PG_BASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5432/jobcrawler"
+    "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
 )
 
 
@@ -914,7 +916,7 @@ def test_two_tests_get_isolated_schemas(pg_conn):
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler pytest tests/unit/test_pg_fixtures.py -v
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler pytest tests/unit/test_pg_fixtures.py -v
 ```
 
 Expected: 2 tests pass.
@@ -995,7 +997,7 @@ def test_upsert_job_creates(pg_conn):
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler pytest tests/ -x -q
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler pytest tests/ -x -q
 ```
 
 Iterate on each failure: fix syntax (`?` → `%s`), type issues (`0/1` for boolean → `True/False`), datetime handling.
@@ -1044,7 +1046,7 @@ Expected: `ok` printed.
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler pytest tests/ -q
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler pytest tests/ -q
 ```
 
 Expected: All tests green (84+ tests).
@@ -1172,19 +1174,19 @@ Drop + recreate dev DB, then run seed:
 ```bash
 docker compose exec postgres dropdb -U jobcrawler jobcrawler --if-exists
 docker compose exec postgres createdb -U jobcrawler jobcrawler
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   python -m crawler.storage.migrations.runner 2>/dev/null  # noop, use migrate()
 ```
 
 Use the runner:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler python -c "
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler python -c "
 from pathlib import Path
 from crawler.storage.db import connect
 from crawler.storage.migrations.runner import migrate
 migrate(connect(), Path('crawler/storage/migrations'))
 "
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   python scripts/seed_demo_data.py
 ```
 
@@ -1225,7 +1227,7 @@ import { Pool } from "pg";
  *
  * Path resolution:
  *   1. DATABASE_URL env var
- *   2. Default: postgresql://jobcrawler:dev@localhost:5432/jobcrawler
+ *   2. Default: postgresql://jobcrawler:dev@localhost:5433/jobcrawler
  *
  * Async (vs previous sync better-sqlite3). RSC supports async natively.
  */
@@ -1234,7 +1236,7 @@ let _pool: Pool | null = null;
 function resolveDatabaseUrl(): string {
   return (
     process.env.DATABASE_URL ??
-    "postgresql://jobcrawler:dev@localhost:5432/jobcrawler"
+    "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
   );
 }
 
@@ -1539,7 +1541,7 @@ import { Client } from "pg";
 
 const DATABASE_URL =
   process.env.DATABASE_URL ??
-  "postgresql://jobcrawler:dev@localhost:5432/jobcrawler_test";
+  "postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test";
 
 export default async function globalSetup() {
   // Drop + recreate test DB for isolation
@@ -1547,10 +1549,10 @@ export default async function globalSetup() {
   const admin = new Client({ connectionString: adminUrl });
   await admin.connect();
   await admin.query(
-    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'jobcrawler_test'`
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '"jobcrawler_test"'`
   );
-  await admin.query(`DROP DATABASE IF EXISTS jobcrawler_test`);
-  await admin.query(`CREATE DATABASE jobcrawler_test`);
+  await admin.query(`DROP DATABASE IF EXISTS "jobcrawler_test"`);
+  await admin.query(`CREATE DATABASE "jobcrawler_test"`);
   await admin.end();
 
   // Run migrations
@@ -1655,14 +1657,14 @@ Find the "quickstart" section. Replace SQLite instructions with:
 
 5. Start dashboard:
    ```bash
-   cd dashboard && npx next start --port 3010
-   # Open http://127.0.0.1:3010
+   cd dashboard && npx next start --port 3011
+   # Open http://127.0.0.1:3011
    ```
 
 ## Tests
 
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler pytest tests/ -q
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler pytest tests/ -q
 cd dashboard && npx playwright test
 ```
 ```
@@ -1685,7 +1687,7 @@ git commit -m "docs(readme): PostgreSQL quickstart (docker-compose + migrations 
 
 Run:
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   pytest tests/ --cov=crawler --cov-report=term-missing -q
 ```
 
@@ -1721,16 +1723,16 @@ git commit -m "test(coverage): fill PG migration gaps — coverage stays >=90%"
 docker compose up -d postgres
 docker compose exec postgres dropdb -U jobcrawler jobcrawler --if-exists
 docker compose exec postgres createdb -U jobcrawler jobcrawler
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   python -c "from pathlib import Path; from crawler.storage.db import connect; from crawler.storage.migrations.runner import migrate; migrate(connect(), Path('crawler/storage/migrations'))"
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   python scripts/seed_demo_data.py
 ```
 
 - [ ] **Step 2: Full pytest**
 
 ```bash
-DATABASE_URL=postgresql://jobcrawler:dev@localhost:5432/jobcrawler \
+DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
   pytest tests/ -q
 ```
 
@@ -1747,11 +1749,11 @@ Expected: clean (0 errors).
 - [ ] **Step 4: Dashboard start + smoke routes**
 
 ```bash
-cd dashboard && npx next start --port 3010 &
+cd dashboard && npx next start --port 3011 &
 SERVER_PID=$!
 sleep 4
 for path in / /jobs /runs; do
-  code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3010$path)
+  code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3011$path)
   echo "$path → HTTP $code"
 done
 kill $SERVER_PID
