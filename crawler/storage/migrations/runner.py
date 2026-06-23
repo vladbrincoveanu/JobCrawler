@@ -1,57 +1,62 @@
-"""Schema migration runner. Spec § Storage Schema + grill-me amendment 2.
+"""PG migration runner.
 
-Scans crawler/storage/migrations/V*.sql, applies unapplied versions in order.
-Idempotent — safe to run on every startup.
+Tracks applied versions in `schema_migrations`. Applies pending
+V*.sql files in order. Idempotent — re-running is a no-op once
+all migrations are applied.
 """
+from __future__ import annotations
+
 import re
-from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 
-from crawler.exceptions import MigrationError
+import psycopg
 
-MIGRATIONS_DIR = Path(__file__).parent
 VERSION_PATTERN = re.compile(r"^V(\d+)__(.+)\.sql$")
 
 
-def _list_migration_files() -> list[Path]:
-    """Return V*.sql files in this dir, sorted by version number."""
-    files = []
-    for path in MIGRATIONS_DIR.glob("V*.sql"):
-        m = VERSION_PATTERN.match(path.name)
+def _applied_versions(conn: psycopg.Connection) -> set[int]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT version FROM schema_migrations")
+        return {row["version"] for row in cur.fetchall()}
+
+
+def _ensure_migrations_table(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version     INTEGER PRIMARY KEY,
+              applied_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+              description TEXT NOT NULL
+            )
+        """)
+    conn.commit()
+
+
+def _discover(migrations_dir: Path) -> list[tuple[int, str, Path]]:
+    """Return [(version, description, path)] sorted by version."""
+    out: list[tuple[int, str, Path]] = []
+    for entry in sorted(migrations_dir.iterdir()):
+        m = VERSION_PATTERN.match(entry.name)
         if m:
-            files.append((int(m.group(1)), path))
-    return [p for _, p in sorted(files)]
+            out.append((int(m.group(1)), m.group(2), entry))
+    return out
 
 
-def _applied_versions(conn: sqlite3.Connection) -> set[int]:
-    """Return versions already in schema_version table."""
-    try:
-        rows = conn.execute("SELECT version FROM schema_version").fetchall()
-        return {r[0] for r in rows}
-    except sqlite3.OperationalError:
-        # schema_version doesn't exist yet → nothing applied
-        return set()
-
-
-def apply(conn: sqlite3.Connection) -> None:
-    """Apply pending migrations. Idempotent."""
+def migrate(conn: psycopg.Connection, migrations_dir: Path) -> list[int]:
+    """Apply pending migrations. Returns list of applied versions."""
+    _ensure_migrations_table(conn)
     applied = _applied_versions(conn)
-    for path in _list_migration_files():
-        m = VERSION_PATTERN.match(path.name)
-        if not m:
-            continue
-        version = int(m.group(1))
+    new: list[int] = []
+    for version, description, path in _discover(migrations_dir):
         if version in applied:
             continue
-        sql = path.read_text(encoding="utf-8")
-        try:
-            conn.executescript(sql)
-        except sqlite3.Error as e:
-            raise MigrationError(f"V{version} ({path.name}) failed: {e}") from e
-        # Record the version (executescript may have created schema_version
-        # via this migration, so this insert comes after the script)
-        conn.execute(
-            "INSERT INTO schema_version (version, applied_at, description) VALUES (?, ?, ?)",
-            (version, datetime.now(timezone.utc).isoformat(), m.group(2).replace("_", " ")),
-        )
+        sql = path.read_text()
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            cur.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (%s, %s)",
+                (version, description),
+            )
+        conn.commit()
+        new.append(version)
+    return new
