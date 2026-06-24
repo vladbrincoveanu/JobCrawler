@@ -1,6 +1,5 @@
 """JobCrawler config constants."""
 import os
-from pathlib import Path
 
 # Concurrency
 MAX_CONCURRENT_FETCHES_PER_SOURCE: int = 4
@@ -19,7 +18,6 @@ SIGINT_GRACE_SECONDS: int = 30
 
 # Database
 DB_BUSY_TIMEOUT_SECONDS: int = 30
-DB_PATH: Path = Path("data/jobs.db")
 
 # Postgres connection (read from env)
 DATABASE_URL: str = os.environ.get(
