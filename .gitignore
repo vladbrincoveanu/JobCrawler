@@ -55,6 +55,13 @@ graphify-out/
 .claude/relentless-status-*.md
 .claude/settings.local.json
 
+# Tooling session captures (regenerable, not source)
+.playwright-mcp/
+.superpowers/
+
+# Dashboard exploration screenshots (regenerable from a running dev server)
+dashboard-*.png
+
 # IDE
 .idea/
 .vscode/
