@@ -16,8 +16,8 @@ from crawler.pipeline import run
 from crawler.sources.ams import AmsAdapter
 from crawler.browser import PlaywrightBrowserContext, SessionCookieStore
 from crawler.storage.db import connect
-from crawler.storage.migrations.runner import apply as apply_migrations
-from crawler.storage.repository import start_run, finalize_run, log_error
+from crawler.storage.migrations.runner import migrate as apply_migrations
+from crawler.storage.repository import start_run, finish_run as finalize_run, record_error as log_error
 
 
 def build_parser() -> argparse.ArgumentParser:
