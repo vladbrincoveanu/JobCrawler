@@ -1,37 +1,40 @@
-import Database from "better-sqlite3";
-import path from "node:path";
+import { Pool } from "pg";
 
 /**
- * Read-only SQLite connection to the JobCrawler DB.
+ * PostgreSQL connection pool for the dashboard.
  *
  * Path resolution:
- *   1. JOB_CRAWLER_DB env var (relative to dashboard/cwd, or absolute)
- *   2. Default: ../data/jobs.db (project root data dir, since npm run dev
- *      is invoked from dashboard/)
+ *   1. DATABASE_URL env var
+ *   2. Default: postgresql://jobcrawler:dev@localhost:5433/jobcrawler
+ *      (host port 5433 because host 5432 is occupied by knowledgeforge-postgres on this dev box)
  *
- * Opened with `{ readonly: true }` so the dashboard cannot mutate jobs/runs
- * even by accident. The Python crawler writes via its own connection (WAL is
- * enabled, so concurrent readers are safe).
+ * Async (vs previous sync better-sqlite3). RSC supports async natively.
  */
-let _db: Database.Database | null = null;
+let _pool: Pool | null = null;
 
-function resolveDbPath(): string {
-  const raw = process.env.JOB_CRAWLER_DB ?? "../data/jobs.db";
-  return path.resolve(process.cwd(), raw);
+function resolveDatabaseUrl(): string {
+  return (
+    process.env.DATABASE_URL ??
+    "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
+  );
 }
 
-export function getDb(): Database.Database {
-  if (_db) return _db;
-  const dbPath = resolveDbPath();
-  _db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  _db.pragma("journal_mode = WAL");
-  return _db;
+export function getPool(): Pool {
+  if (_pool) return _pool;
+  _pool = new Pool({
+    connectionString: resolveDatabaseUrl(),
+    min: 2,
+    max: 10,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
+  });
+  return _pool;
 }
 
-/** For tests: reset the cached connection so a different path can be used. */
-export function resetDb(): void {
-  if (_db) {
-    _db.close();
-    _db = null;
+/** For tests: reset cached pool so a different connection can be used. */
+export async function resetPool(): Promise<void> {
+  if (_pool) {
+    await _pool.end();
+    _pool = null;
   }
 }

@@ -1,33 +1,56 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, existsSync } from "node:fs";
+import { Client } from "pg";
 import path from "node:path";
 
 /**
- * Global setup: regenerate a clean test DB at .next/test.db before each
- * Playwright run. Invokes the Python seed script with --force so the
- * dashboard sees a deterministic 5-job / 2-run / 1-error fixture set.
+ * Global setup: create clean PG test DB, run migrations, seed.
+ *
+ * Uses DATABASE_URL or defaults to local docker-compose PG on port 5433
+ * (5432 is occupied by knowledgeforge-postgres on this dev box).
  */
-const TEST_DB = path.resolve(__dirname, "../.next/test.db");
+const DATABASE_URL =
+  process.env.DATABASE_URL ??
+  "postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test";
+
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const SEED_SCRIPT = path.join(PROJECT_ROOT, "scripts/seed_demo_data.py");
 
 export default async function globalSetup() {
-  mkdirSync(path.dirname(TEST_DB), { recursive: true });
-  if (existsSync(TEST_DB)) {
-    rmSync(TEST_DB, { force: true });
-    // WAL mode leaves sidecar files; remove them too.
-    for (const suffix of ["-shm", "-wal"]) {
-      const p = TEST_DB + suffix;
-      if (existsSync(p)) rmSync(p, { force: true });
-    }
+  // Drop + recreate test DB for isolation
+  const adminUrl = DATABASE_URL.replace(/\/[^/]+$/, "/postgres");
+  const admin = new Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'jobcrawler_test'`
+    );
+    await admin.query(`DROP DATABASE IF EXISTS jobcrawler_test`);
+    await admin.query(`CREATE DATABASE jobcrawler_test`);
+  } finally {
+    await admin.end();
   }
 
+  // Run migrations
   execFileSync(
     "python",
-    [SEED_SCRIPT, "--force", "--db", TEST_DB],
+    [
+      "-c",
+      "from pathlib import Path; from crawler.storage.db import connect; from crawler.storage.migrations.runner import migrate; migrate(connect(), Path('crawler/storage/migrations'))",
+    ],
     {
       cwd: PROJECT_ROOT,
-      env: { ...process.env, PYTHONPATH: PROJECT_ROOT },
+      env: { ...process.env, DATABASE_URL, PYTHONPATH: PROJECT_ROOT },
+      stdio: "inherit",
+    }
+  );
+
+  // Seed demo data
+  execFileSync(
+    "python",
+    [SEED_SCRIPT, "--force", "--database-url", DATABASE_URL],
+    {
+      cwd: PROJECT_ROOT,
+      env: { ...process.env, DATABASE_URL, PYTHONPATH: PROJECT_ROOT },
       stdio: "inherit",
     }
   );

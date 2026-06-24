@@ -39,10 +39,7 @@ export function RunTable({ runs, errorsByRun = {} }: RunTableProps) {
               Found
             </th>
             <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">
-              Inserted
-            </th>
-            <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">
-              Updated
+              New
             </th>
             <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wide text-gray-500">
               Errors
@@ -71,13 +68,10 @@ export function RunTable({ runs, errorsByRun = {} }: RunTableProps) {
                   <StatusBadge status={run.status} />
                 </td>
                 <td className="px-4 py-2 text-right text-sm text-gray-700">
-                  {run.jobs_found ?? 0}
+                  {run.jobs_found}
                 </td>
                 <td className="px-4 py-2 text-right text-sm text-gray-700">
-                  {run.jobs_inserted ?? 0}
-                </td>
-                <td className="px-4 py-2 text-right text-sm text-gray-700">
-                  {run.jobs_updated ?? 0}
+                  {run.jobs_new}
                 </td>
                 <td className="px-4 py-2 text-right text-sm">
                   {errors.length > 0 ? (
@@ -96,18 +90,11 @@ export function RunTable({ runs, errorsByRun = {} }: RunTableProps) {
                             className="rounded border border-red-100 bg-red-50 p-2"
                           >
                             <div className="font-medium text-red-700">
-                              {e.error_type}
+                              {e.stage}
                             </div>
-                            {e.url && (
-                              <div className="truncate font-mono text-gray-600">
-                                {e.url}
-                              </div>
-                            )}
-                            {e.error_message && (
-                              <div className="text-gray-700">
-                                {e.error_message}
-                              </div>
-                            )}
+                            <div className="text-gray-700">
+                              {e.message}
+                            </div>
                           </li>
                         ))}
                       </ul>

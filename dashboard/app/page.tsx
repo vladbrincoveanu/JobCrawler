@@ -5,17 +5,14 @@ import { RunTable } from "@/components/RunTable";
 
 export const dynamic = "force-dynamic";
 
-export default function OverviewPage() {
-  const stats = getStats();
-  const recentJobs = listJobs({ limit: 10 }).jobs;
-  const recentRuns = listRuns(5);
+export default async function OverviewPage() {
+  const stats = await getStats();
+  const recentJobs = (await listJobs({ limit: 10 })).jobs;
+  const recentRuns = await listRuns(5);
 
-  // Pull errors for each recent run (cap at 5 errors per run for overview)
-  const errorsByRun: Record<number, ReturnType<typeof listErrorsForRun>> = {};
+  const errorsByRun: Record<number, Awaited<ReturnType<typeof listErrorsForRun>>> = {};
   for (const run of recentRuns) {
-    if ((run.errors_count ?? 0) > 0) {
-      errorsByRun[run.id] = listErrorsForRun(run.id).slice(0, 5);
-    }
+    errorsByRun[run.id] = (await listErrorsForRun(run.id)).slice(0, 5);
   }
 
   return (
@@ -34,13 +31,13 @@ export default function OverviewPage() {
         <StatCard
           testId="stat-total-jobs"
           label="Total jobs"
-          value={stats.totalJobs.toLocaleString()}
-          hint={`${stats.activeJobs.toLocaleString()} active`}
+          value={stats.jobsTotal.toLocaleString()}
         />
         <StatCard
           testId="stat-total-runs"
-          label="Total runs"
-          value={stats.totalRuns.toLocaleString()}
+          label="Successful runs"
+          value={stats.runsSuccess.toLocaleString()}
+          hint={`${stats.runsFailed} failed/partial`}
         />
         <StatCard
           testId="stat-last-run"
@@ -61,9 +58,9 @@ export default function OverviewPage() {
           }
         />
         <StatCard
-          testId="stat-last24h-errors"
-          label="Errors (24h)"
-          value={stats.last24hErrors.toLocaleString()}
+          testId="stat-errors-total"
+          label="Errors"
+          value={stats.errorsTotal.toLocaleString()}
         />
       </section>
 

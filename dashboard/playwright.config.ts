@@ -1,18 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
-import path from "node:path";
 
 /**
  * Playwright config for the dashboard.
  *
- * Test isolation: uses a dedicated test DB at .next/test.db (gitignored,
- * regenerated per run). Global setup invokes the Python seed script with
- * --force so each run starts from a known state. The webServer points the
- * dashboard at this test DB via JOB_CRAWLER_DB.
+ * Test isolation: global setup creates a dedicated test DB (jobcrawler_test),
+ * runs migrations, seeds demo data. The webServer points the dashboard at
+ * this DB via DATABASE_URL.
+ *
+ * Port 3011 used because port 3010 is occupied by knowledgeforge-ui.
  */
-const TEST_DB = path.resolve(__dirname, ".next/test.db");
-const PROJECT_ROOT = path.resolve(__dirname, "..");
-const SEED_SCRIPT = path.join(PROJECT_ROOT, "scripts/seed_demo_data.py");
-
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
@@ -22,7 +18,7 @@ export default defineConfig({
   reporter: "list",
 
   use: {
-    baseURL: "http://127.0.0.1:3010",
+    baseURL: "http://127.0.0.1:3011",
     trace: "on-first-retry",
     actionTimeout: 5000,
     navigationTimeout: 10000,
@@ -35,11 +31,11 @@ export default defineConfig({
     },
   ],
 
-  globalSetup: path.resolve(__dirname, "tests/global-setup.ts"),
+  globalSetup: require("node:path").resolve(__dirname, "tests/global-setup.ts"),
 
   webServer: {
-    command: `JOB_CRAWLER_DB=${TEST_DB} npx next start --port 3010`,
-    url: "http://127.0.0.1:3010",
+    command: `DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test npx next start --port 3011`,
+    url: "http://127.0.0.1:3011",
     timeout: 30_000,
     reuseExistingServer: !process.env.CI,
     stdout: "pipe",
