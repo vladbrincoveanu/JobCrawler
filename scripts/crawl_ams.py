@@ -5,7 +5,10 @@ AMS moved away from /public/jobs (paginated HTML) to /public/emps/
 
 This script:
   1. Drives Playwright to accept consent and submit a search
-  2. Scrapes rendered job cards from the results page (paginates via URL)
+  2. Scrapes rendered job cards from the results page; paginates by
+     clicking the AMS SPA's `<a data-testid="ams-pagination-list-page-N-link">`
+     (URL also updates to ?page=N& but clicking is deterministic against
+     the Angular SPA — direct URL goto is flaky)
   3. For each card, follows the link to the detail page and scrapes
      the structured data (company, location, employment type, etc.)
   4. Persists to PostgreSQL via the repository.
@@ -168,6 +171,53 @@ def _detail_to_record(uuid: str, href: str, basic: dict, detail: dict) -> dict:
     }
 
 
+async def _goto_page(page: Page, results_url: str, page_no: int) -> bool:
+    """Navigate to AMS results page `page_no`.
+
+    AMS renders a pagination control (a Bootstrap-style nav with one
+    `<a data-testid="ams-pagination-list-page-N-link" class="page-link">`
+    per page, plus first/prev/next). Clicking the link is the SPA's
+    expected flow and updates the URL to ?page=N&. Direct URL goto
+    (loading the results URL with the page=N param) also renders the
+    correct cards — we use that approach here because the loop above
+    visits job detail pages in between, so the page is not on the
+    results screen when we want to advance.
+
+    Whichever navigation we use, the SPA is what actually renders the
+    cards, so we wait for the active-page indicator to flip to `page_no`
+    before scraping — that's the SPA's signal that the new result set
+    has been requested and the DOM has been updated.
+
+    Returns True on success, False otherwise.
+    """
+    import re
+    if page_no <= 1:
+        return True
+    # Build the URL for this page. Replace existing page= or append.
+    if re.search(r"[?&]page=\d+", results_url):
+        new_url = re.sub(r"([?&])page=\d+", rf"\1page={page_no}", results_url)
+    else:
+        sep = "&" if "?" in results_url else "?"
+        new_url = f"{results_url}{sep}page={page_no}"
+    try:
+        await page.goto(new_url, wait_until="domcontentloaded", timeout=45000)
+    except Exception:
+        return False
+    # Wait for the SPA to render the new page — the .ams-page-item.active
+    # indicator flips to the requested page number when the new results
+    # are bound to the DOM. Without this wait, _scrape_cards may read the
+    # previous page's cards and produce duplicates.
+    try:
+        await page.wait_for_selector(
+            f'.ams-page-item.active:has-text("{page_no}")', timeout=10000
+        )
+    except Exception:
+        return False
+    # Brief settle for the cards themselves to render after the class flip.
+    await page.wait_for_timeout(1500)
+    return True
+
+
 async def crawl(query: str, limit: int, conn, run_id: int) -> dict:
     counters = {"found": 0, "inserted": 0, "updated": 0, "errors": 0}
 
@@ -180,20 +230,13 @@ async def crawl(query: str, limit: int, conn, run_id: int) -> dict:
         await _accept_consent(page)
 
         await _submit_search(page, query)
+        results_url = page.url
 
         page_no = 1
         while counters["found"] < limit:
-            if page_no > 1:
-                # Navigate by appending page param to current URL
-                cur = page.url
-                if "page=" in cur:
-                    new_url = cur.replace(f"page={page_no - 1}", f"page={page_no}")
-                else:
-                    sep = "&" if "?" in cur else "?"
-                    new_url = f"{cur}{sep}page={page_no}"
-                await page.goto(new_url, wait_until="domcontentloaded", timeout=45000)
-                await page.wait_for_timeout(4000)
-                await _accept_consent(page)
+            if not await _goto_page(page, results_url, page_no):
+                print(f"[ams] cannot navigate to page {page_no}, stopping pagination")
+                break
 
             cards = await _scrape_cards(page)
             print(f"[ams] page {page_no}: {len(cards)} cards")
