@@ -250,9 +250,7 @@ export default function App() {
                   </td>
                   <td>{new Date(j.last_seen_at).toLocaleString()}</td>
                   <td>
-                    <a href={j.url} target="_blank" rel="noreferrer">
-                      ↗
-                    </a>
+                    <SafeLink href={j.url} />
                   </td>
                 </tr>
               ))}
@@ -302,6 +300,19 @@ function Card({ label, value }: { label: string; value: string | number }) {
       <div className="card-label">{label}</div>
       <div className="card-value">{value}</div>
     </div>
+  );
+}
+
+/** Render an <a> only if the URL has an http(s) scheme. Crawled listings
+ *  occasionally contain javascript: or data: URLs; we silently drop them
+ *  rather than executing them in the page. */
+function SafeLink({ href }: { href: string }) {
+  const safe = /^(https?:)?\/\//i.test(href) ? href : null;
+  if (!safe) return <span className="muted">—</span>;
+  return (
+    <a href={safe} target="_blank" rel="noreferrer">
+      ↗
+    </a>
   );
 }
 

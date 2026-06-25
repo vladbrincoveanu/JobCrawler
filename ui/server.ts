@@ -37,6 +37,14 @@ app.use(express.json({ limit: "256kb" }));
 const db = new Client({ connectionString: DATABASE_URL });
 await db.connect();
 
+/** Log the full error server-side and return a generic 500 to the client.
+ *  Prevents leaking DB error text (table names, query fragments, etc.) to
+ *  whoever can hit the API. */
+function serverError(res: express.Response, e: unknown): void {
+  console.error("[jobcrawler-ui]", e);
+  res.status(500).json({ error: "internal error" });
+}
+
 // Idempotent schema setup. V002 migration ships the canonical DDL; we apply
 // the create-table here so the UI can boot against an existing DB without
 // needing the full migration runner.
@@ -79,7 +87,7 @@ app.get("/api/stats", async (_req, res) => {
       lastRun: row.last_run,
     });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -114,7 +122,7 @@ app.get("/api/jobs", async (req, res) => {
     );
     res.json(r.rows);
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -129,7 +137,7 @@ app.get("/api/locations", async (_req, res) => {
     `);
     res.json(r.rows);
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -147,7 +155,7 @@ app.get("/api/jobs/:id", async (req, res) => {
     }
     res.json(r.rows[0]);
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -209,7 +217,7 @@ app.post("/api/jobs/enrich-batch", async (req, res) => {
     }
     res.json({ processed: jobs.rows.length, results });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -241,7 +249,7 @@ app.get("/api/jobs/:id/enrichment", async (req, res) => {
     }
     res.json({ enriched: true, ...row });
   } catch (e) {
-    res.status(500).json({ error: String(e) });
+    serverError(res, e);
   }
 });
 
@@ -254,8 +262,20 @@ app.use((_req, res) => res.sendFile(path.join(distDir, "index.html")));
 
 app.listen(PORT, () => {
   console.log(`JobCrawler UI: http://localhost:${PORT}`);
-  console.log(`  using DATABASE_URL: ${DATABASE_URL}`);
+  console.log(`  using DATABASE_URL: ${redactDbUrl(DATABASE_URL)}`);
   console.log(
     `  LLM salary: ${process.env.NVIDIA_API_KEY ? "enabled" : "disabled (set NVIDIA_API_KEY)"}`,
   );
 });
+
+/** Redact credentials from a Postgres URL for log output. Example:
+ *  postgresql://user:pass@host:5432/db → postgresql://user:***@host:5432/db */
+function redactDbUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = "***";
+    return u.toString();
+  } catch {
+    return "(unparseable DATABASE_URL)";
+  }
+}
