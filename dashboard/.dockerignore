@@ -1,0 +1,7 @@
+# Reduce build context for the dashboard image
+node_modules
+.next
+test-results
+playwright-report
+*.log
+.DS_Store

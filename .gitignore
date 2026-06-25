@@ -9,6 +9,7 @@ node_modules/
 out/
 build/
 dist/
+dist-server/
 *.tsbuildinfo
 next-env.d.ts
 .turbo/
