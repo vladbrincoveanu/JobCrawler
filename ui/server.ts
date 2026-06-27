@@ -5,6 +5,7 @@
  *   GET  /api/stats                              → counts + last run
  *   GET  /api/jobs?location=&source=             → jobs (with enrichment joined), most recent first
  *   GET  /api/locations                          → distinct (location, count) pairs
+ *   GET  /api/runs                               → recent crawl runs (most recent first)
  *   GET  /api/jobs/:id                           → single job with description
  *   POST /api/jobs/enrich-batch                  → { ids: number[] } → run LLM enrichment
  *
@@ -110,8 +111,15 @@ app.get("/api/jobs", async (req, res) => {
       `
       SELECT j.id, j.source, j.title, j.company, j.location, j.url,
              j.last_seen_at, j.content_hash,
-             e.salary_min, e.salary_max, e.salary_currency, e.salary_reason,
-             e.keywords, e.reviews_note, e.enriched_at
+             CASE WHEN e.content_hash IS NOT NULL THEN json_build_object(
+               'salary_min', e.salary_min,
+               'salary_max', e.salary_max,
+               'salary_currency', e.salary_currency,
+               'salary_reason', e.salary_reason,
+               'keywords', e.keywords,
+               'reviews_note', e.reviews_note,
+               'enriched_at', e.enriched_at
+             ) END AS enrichment
         FROM jobs j
         LEFT JOIN job_enrichments e ON e.content_hash = j.content_hash
         ${whereSql}
@@ -141,6 +149,20 @@ app.get("/api/locations", async (_req, res) => {
   }
 });
 
+app.get("/api/runs", async (_req, res) => {
+  try {
+    const r = await db.query(`
+      SELECT id, source, status, jobs_found, jobs_new, started_at
+        FROM runs
+       ORDER BY started_at DESC
+       LIMIT 50
+    `);
+    res.json(r.rows);
+  } catch (e) {
+    serverError(res, e);
+  }
+});
+
 app.get("/api/jobs/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
@@ -162,10 +184,20 @@ app.get("/api/jobs/:id", async (req, res) => {
 /** Run keyword + LLM-salary enrichment for the requested job ids.
  *  Idempotent — already-enriched jobs are skipped unless `force=true`. */
 app.post("/api/jobs/enrich-batch", async (req, res) => {
-  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const raw = Array.isArray(req.body?.ids) ? req.body.ids : [];
   const force = req.body?.force === true;
-  if (!ids.length || !ids.every((n: unknown) => Number.isInteger(n))) {
-    res.status(400).json({ error: "ids: number[] required" });
+  // pg returns BIGINT as string; accept either native numbers or numeric strings.
+  const ids: number[] = [];
+  for (const n of raw) {
+    const asNum = typeof n === "number" ? n : Number(n);
+    if (!Number.isInteger(asNum) || asNum <= 0) {
+      res.status(400).json({ error: "ids: number[] required (got " + JSON.stringify(raw) + ")" });
+      return;
+    }
+    ids.push(asNum);
+  }
+  if (!ids.length) {
+    res.status(400).json({ error: "ids: number[] required (empty)" });
     return;
   }
   const results: { id: number; status: "ok" | "skipped" | "failed"; reason?: string }[] = [];
