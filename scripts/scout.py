@@ -35,6 +35,7 @@ API_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) job-sco
 
 DEFAULT_CV = Path.home() / "Documents" / "Vlad_Brincoveanu_CV_2026.pdf"
 PROFILE_PATH = Path(__file__).resolve().parent.parent / "data" / "profile.json"
+SENT_PATH = Path(__file__).resolve().parent.parent / "data" / "sent_jobs.json"
 IMMO_CONFIG = Path.home() / "Desktop" / "Startup" / "immo-scouter" / "config.json"
 
 # Fallback skill lexicon for profile extraction without an LLM. Weights are
@@ -289,6 +290,12 @@ def reachable_from_home(job: dict, countries: list[str]) -> bool:
     return False
 
 
+def fingerprint(job: dict) -> str:
+    return hashlib.md5(
+        f"{(job['company'] or '').lower()}|{(job['title'] or '').lower()}".encode()
+    ).hexdigest()
+
+
 def dedupe(jobs: list[dict]) -> list[dict]:
     """Collapse multi-location repostings: one entry per company+title,
     preferring an Austrian/Vienna variant, then the freshest posting."""
@@ -299,13 +306,22 @@ def dedupe(jobs: list[dict]) -> list[dict]:
 
     seen: dict[str, dict] = {}
     for job in jobs:
-        fp = hashlib.md5(
-            f"{(job['company'] or '').lower()}|{(job['title'] or '').lower()}".encode()
-        ).hexdigest()
+        fp = fingerprint(job)
         prev = seen.get(fp)
         if prev is None or rank(job) > rank(prev):
             seen[fp] = job
     return list(seen.values())
+
+
+def load_sent() -> dict:
+    if SENT_PATH.exists():
+        return json.loads(SENT_PATH.read_text())
+    return {}
+
+
+def save_sent(sent: dict) -> None:
+    SENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SENT_PATH.write_text(json.dumps(sent, indent=2, sort_keys=True))
 
 
 # --------------------------------------------------------------------------- scoring
@@ -494,6 +510,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
     parser.add_argument("--no-apis", action="store_true",
                         help="skip live free APIs (arbeitnow, remotive, jobicy)")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="don't skip jobs already sent in a previous run")
+    parser.add_argument("--reset-sent", action="store_true",
+                        help="clear the sent-jobs history before this run")
     parser.add_argument("--telegram", choices=["dev", "main"], default="dev",
                         help="which immo-scouter bot to use (default dev)")
     parser.add_argument("--telegram-config", type=Path, default=IMMO_CONFIG)
@@ -545,7 +565,17 @@ def main() -> int:
     api_key = os.environ.get("NVIDIA_API_KEY")
     if api_key and not args.no_llm:
         llm_rerank(jobs, profile, api_key)
+
+    sent = {} if args.reset_sent else load_sent()
+    if not args.no_dedup:
+        before = len(jobs)
+        jobs = [j for j in jobs if fingerprint(j) not in sent]
+        log(f"{len(jobs)} new (skipped {before - len(jobs)} already sent)")
     jobs = jobs[: args.top]
+
+    if not jobs:
+        log("no new matches since last run — nothing to send")
+        return 0
 
     message = format_message(jobs, args)
     if args.dry_run:
@@ -553,6 +583,10 @@ def main() -> int:
         return 0
     token, chat_id = resolve_telegram(args.telegram, args.telegram_config)
     send_telegram(token, chat_id, message)
+    today = date.today().isoformat()
+    for job in jobs:
+        sent[fingerprint(job)] = today
+    save_sent(sent)
     return 0
 
 

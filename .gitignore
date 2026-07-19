@@ -84,3 +84,5 @@ pnpm-debug.log*
 .pgdata/
 postgres-data/
 data/profile.json
+data/sent_jobs.json
+logs/
