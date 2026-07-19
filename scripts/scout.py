@@ -4,7 +4,9 @@ send the top matches as a Telegram message.
 
 Default run (dry):    python scripts/scout.py --dry-run
 Send to dev bot:      python scripts/scout.py
-Defaults: AT (Vienna boosted) + remote EU/global, min €85k (unknown salaries kept).
+Defaults: AT (Vienna boosted) + remote EU/global, min €85k (unknown salaries kept),
+top 5, never resends a job already delivered. Dashboard: data/dashboard.html
+(regenerated on every send — open it directly in a browser, no server needed).
 Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
 
 Telegram credentials: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars, or fallback
@@ -20,7 +22,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -272,9 +274,13 @@ GENERIC_REMOTE_RE = re.compile(r"^\s*(fully )?(remote|anywhere|worldwide|global)
                                re.IGNORECASE)
 EU_HINT_RE = re.compile(
     r"europe|emea|\beu\b|austria|österreich|wien|vienna|german|deutschland|switzerland|schweiz"
-    r"|netherlands|poland|spain|portugal|italy|france|belgium|ireland|denmark|sweden|finland"
+    r"|netherlands|poland|spain|portugal|italy|france|belgium|denmark|sweden|finland"
     r"|norway|czech|slovak|hungary|romania|bulgaria|croatia|slovenia|estonia|latvia|lithuania"
-    r"|greece|luxembourg|united kingdom|\buk\b", re.IGNORECASE)
+    r"|greece|luxembourg", re.IGNORECASE)
+# UK/Ireland deliberately excluded from the generic EU hint: "remote, UK" or
+# "remote, Ireland" almost always means UK/IE work authorization required,
+# not free movement — the false positive that let "Zilch UK" through.
+UK_ONLY_RE = re.compile(r"\bu\.?k\.?\b|united kingdom|\bireland\b", re.IGNORECASE)
 
 
 def reachable_from_home(job: dict, countries: list[str]) -> bool:
@@ -286,14 +292,24 @@ def reachable_from_home(job: dict, countries: list[str]) -> bool:
         if any(pat in lower for pat in COUNTRY_LOCATION_PATTERNS.get(c, [])):
             return True
     if "true" in (job.get("is_remote") or "").lower():
+        if UK_ONLY_RE.search(loc) and not EU_HINT_RE.search(loc.replace("uk", "")):
+            return False
         return bool(GENERIC_REMOTE_RE.match(loc) or EU_HINT_RE.search(loc))
     return False
 
 
+GENDER_MARKER_RE = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\)?", re.IGNORECASE)
+
+
+def normalize_title(title: str) -> str:
+    t = GENDER_MARKER_RE.sub(" ", (title or "").lower())
+    t = re.sub(r"[^a-z0-9äöüß]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def fingerprint(job: dict) -> str:
-    return hashlib.md5(
-        f"{(job['company'] or '').lower()}|{(job['title'] or '').lower()}".encode()
-    ).hexdigest()
+    company = re.sub(r"\s+", " ", (job["company"] or "").strip().lower())
+    return hashlib.md5(f"{company}|{normalize_title(job['title'])}".encode()).hexdigest()
 
 
 def dedupe(jobs: list[dict]) -> list[dict]:
@@ -410,6 +426,50 @@ def llm_rerank(jobs: list[dict], profile: dict, api_key: str) -> None:
 
 # --------------------------------------------------------------------------- telegram
 
+DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "data" / "dashboard.html"
+
+
+def generate_dashboard(sent: dict) -> None:
+    """Simplest possible dashboard: one static HTML file, no server.
+    Open data/dashboard.html directly in a browser."""
+    def esc(text) -> str:
+        return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    def row(rec) -> str:
+        if not isinstance(rec, dict):  # legacy entries from before the dashboard existed
+            return f"<tr><td>{esc(rec)}</td><td colspan=6>(sent before dashboard tracking started)</td></tr>"
+        link = f'<a href="{esc(rec["apply_url"])}" target="_blank">apply</a>' if rec.get("apply_url") else ""
+        salary = f"€{rec['salary']:,}" if isinstance(rec.get("salary"), int) else esc(rec.get("salary"))
+        return (f"<tr><td>{esc(rec.get('sent_date'))}</td><td>{esc(rec.get('title'))}</td>"
+                f"<td>{esc(rec.get('company'))}</td><td>{esc(rec.get('location'))}</td>"
+                f"<td>{salary}</td><td>{esc(rec.get('fit'))}</td>"
+                f"<td>{esc(rec.get('posted'))}</td><td>{link}</td></tr>")
+
+    ordered = sorted(sent.items(),
+                     key=lambda kv: kv[1].get("sent_date", "") if isinstance(kv[1], dict) else str(kv[1]),
+                     reverse=True)
+    rows_html = "\n".join(row(rec) for _, rec in ordered)
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Job Scout — sent history</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d10;color:#e6e6e6;padding:24px}}
+h1{{font-size:18px;margin:0 0 4px}} .meta{{color:#888;margin-bottom:16px;font-size:13px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{padding:6px 10px;border-bottom:1px solid #222;text-align:left;vertical-align:top}}
+th{{color:#9ab;position:sticky;top:0;background:#0b0d10}}
+tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
+</style></head><body>
+<h1>Job Scout — sent history</h1>
+<div class="meta">{len(sent)} jobs ever sent · generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+<table><thead><tr><th>Sent</th><th>Title</th><th>Company</th><th>Location</th>
+<th>Salary</th><th>Fit</th><th>Posted</th><th></th></tr></thead>
+<tbody>{rows_html}</tbody></table>
+</body></html>"""
+    DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DASHBOARD_PATH.write_text(html)
+    log(f"dashboard: file://{DASHBOARD_PATH}")
+
+
 def resolve_telegram(target: str, config_path: Path) -> tuple[str, str]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
@@ -495,7 +555,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-salary", action="store_true",
                         help="drop jobs with no parseable salary")
     parser.add_argument("--days", type=int, default=14, help="recency window (default 14)")
-    parser.add_argument("--top", type=int, default=10, help="number of jobs in the message")
+    parser.add_argument("--top", type=int, default=5, help="number of jobs in the message (default 5)")
     parser.add_argument("--slices", default=",".join(DEFAULT_SLICES),
                         help=f"jobhive slices; 'all' adds {','.join(BIG_SLICES)}")
     parser.add_argument("--keywords", default="", help="comma-separated boost terms")
@@ -554,28 +614,25 @@ def main() -> int:
 
     for job in jobs:
         job["score"] = score_job(job, profile, exclude_terms, extra_keywords)
-    rerank_pool = max(args.top * 3, 30)
-    jobs = sorted((j for j in jobs if j["score"] > 0),
-                  key=lambda j: j["score"], reverse=True)[:rerank_pool]
+    jobs = sorted((j for j in jobs if j["score"] > 0), key=lambda j: j["score"], reverse=True)
     log(f"{len(jobs)} jobs after dedupe/filter/score")
-    if not jobs:
-        log("no matches — widen --days, --countries or --slices")
-        return 1
-
-    api_key = os.environ.get("NVIDIA_API_KEY")
-    if api_key and not args.no_llm:
-        llm_rerank(jobs, profile, api_key)
 
     sent = {} if args.reset_sent else load_sent()
     if not args.no_dedup:
         before = len(jobs)
         jobs = [j for j in jobs if fingerprint(j) not in sent]
         log(f"{len(jobs)} new (skipped {before - len(jobs)} already sent)")
-    jobs = jobs[: args.top]
 
+    rerank_pool = max(args.top * 4, 20)
+    jobs = jobs[:rerank_pool]
     if not jobs:
         log("no new matches since last run — nothing to send")
         return 0
+
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if api_key and not args.no_llm:
+        llm_rerank(jobs, profile, api_key)
+    jobs = jobs[: args.top]
 
     message = format_message(jobs, args)
     if args.dry_run:
@@ -585,8 +642,16 @@ def main() -> int:
     send_telegram(token, chat_id, message)
     today = date.today().isoformat()
     for job in jobs:
-        sent[fingerprint(job)] = today
+        sent[fingerprint(job)] = {
+            "sent_date": today, "title": job["title"],
+            "company": ("(EURES — see ad)" if (job["company"] or "").lower().startswith("siehe")
+                       else job["company"]),
+            "location": job.get("location") or "", "posted": job.get("posted") or "",
+            "salary": annual_salary_eur(job) or job.get("salary_summary") or "",
+            "fit": job.get("fit", ""), "apply_url": job.get("apply_url") or job.get("url") or "",
+        }
     save_sent(sent)
+    generate_dashboard(sent)
     return 0
 
 
