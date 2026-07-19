@@ -4,7 +4,8 @@ send the top matches as a Telegram message.
 
 Default run (dry):    python scripts/scout.py --dry-run
 Send to dev bot:      python scripts/scout.py
-Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8
+Defaults: AT (Vienna boosted) + remote EU/global, min €85k (unknown salaries kept).
+Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
 
 Telegram credentials: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars, or fallback
 to immo-scouter's config.json (--telegram dev|main selects the bot there).
@@ -74,6 +75,31 @@ def log(msg: str) -> None:
     print(f"[scout] {msg}", file=sys.stderr)
 
 
+def nvidia_chat(api_key: str, prompt: str, max_tokens: int) -> str:
+    """One NVIDIA chat completion with a single retry on 5xx/timeouts."""
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            resp = requests.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": NVIDIA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                },
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt == 1:
+                log(f"NVIDIA call failed ({exc}); retrying once")
+    raise last_exc  # type: ignore[misc]
+
+
 # --------------------------------------------------------------------------- profile
 
 def extract_cv_text(cv_path: Path) -> str:
@@ -100,19 +126,7 @@ def build_profile_with_llm(cv_text: str, api_key: str) -> dict | None:
         "appear in matching job titles, include German variants).\n\nCV:\n" + cv_text[:12000]
     )
     try:
-        resp = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": NVIDIA_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 800,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
+        text = nvidia_chat(api_key, prompt, max_tokens=800)
         match = re.search(r"\{.*\}", text, re.DOTALL)
         profile = json.loads(match.group(0)) if match else None
         if profile and profile.get("skills"):
@@ -143,7 +157,7 @@ def load_profile(cv_path: Path, rebuild: bool) -> dict:
 # --------------------------------------------------------------------------- query
 
 def fetch_jobs(slices: list[str], countries: list[str], days: int,
-               role_titles: list[str], include_remote: bool) -> list[dict]:
+               role_titles: list[str], remote: str) -> list[dict]:
     urls = [f"{JOBHIVE_BASE}/{s}/jobs.parquet" for s in slices]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
 
@@ -151,12 +165,19 @@ def fetch_jobs(slices: list[str], countries: list[str], days: int,
     for c in countries:
         for pat in COUNTRY_LOCATION_PATTERNS.get(c, []):
             loc_clauses.append(f"location ILIKE '%{pat}%'")
-    if include_remote:
+    if remote == "eu":
         loc_clauses.append("(is_remote ILIKE '%true%' AND (location ILIKE '%europe%' OR location ILIKE '%emea%' OR location ILIKE '%eu%'))")
+    elif remote == "global":
+        # any remote job not explicitly restricted to the Americas/APAC
+        loc_clauses.append(
+            "(is_remote ILIKE '%true%' AND NOT location ILIKE '%united states%'"
+            " AND NOT location ILIKE '%canada%' AND NOT location ILIKE '%latam%'"
+            " AND NOT location ILIKE '%apac%' AND NOT regexp_matches(location, ', ?[A-Z]{2}, US'))"
+        )
     title_clauses = " OR ".join(f"title ILIKE '%{t}%'" for t in role_titles)
 
     query = f"""
-        SELECT url, title, company, ats_type, location, is_remote,
+        SELECT url, title, company, ats_type, location, is_remote, country_iso,
                salary_min, salary_max, salary_currency, salary_period, salary_summary,
                employment_type, description, posted_at[:10] AS posted, apply_url
         FROM read_parquet({json.dumps(urls)})
@@ -173,14 +194,49 @@ def fetch_jobs(slices: list[str], countries: list[str], days: int,
     return [dict(zip(cols, r)) for r in rows]
 
 
+# Region restrictions that show up in titles rather than the location field.
+FOREIGN_REGION_RE = re.compile(
+    r"latam|apac|\bus only\b|\bu\.s\.\b|united states|canada|india|philippines", re.IGNORECASE)
+
+# A remote job is takeable from Austria only if its location is generic
+# ("Remote", "Worldwide") or Europe-flavored; "Remote - Brazil" means hiring there.
+GENERIC_REMOTE_RE = re.compile(r"^\s*(fully )?(remote|anywhere|worldwide|global)[\s!,.·-]*$",
+                               re.IGNORECASE)
+EU_HINT_RE = re.compile(
+    r"europe|emea|\beu\b|austria|österreich|wien|vienna|german|deutschland|switzerland|schweiz"
+    r"|netherlands|poland|spain|portugal|italy|france|belgium|ireland|denmark|sweden|finland"
+    r"|norway|czech|slovak|hungary|romania|bulgaria|croatia|slovenia|estonia|latvia|lithuania"
+    r"|greece|luxembourg|united kingdom|\buk\b", re.IGNORECASE)
+
+
+def reachable_from_home(job: dict, countries: list[str]) -> bool:
+    loc = job["location"] or ""
+    if (job.get("country_iso") or "").upper() in countries:
+        return True
+    lower = loc.lower()
+    for c in countries:
+        if any(pat in lower for pat in COUNTRY_LOCATION_PATTERNS.get(c, [])):
+            return True
+    if "true" in (job.get("is_remote") or "").lower():
+        return bool(GENERIC_REMOTE_RE.match(loc) or EU_HINT_RE.search(loc))
+    return False
+
+
 def dedupe(jobs: list[dict]) -> list[dict]:
+    """Collapse multi-location repostings: one entry per company+title,
+    preferring an Austrian/Vienna variant, then the freshest posting."""
+    def rank(job: dict) -> tuple:
+        loc = (job["location"] or "").lower()
+        at = any(p in loc for p in COUNTRY_LOCATION_PATTERNS["AT"]) or loc.startswith("at ")
+        return (at, job["posted"] or "")
+
     seen: dict[str, dict] = {}
     for job in jobs:
         fp = hashlib.md5(
-            f"{(job['company'] or '').lower()}|{(job['title'] or '').lower()}|{(job['location'] or '').lower()}".encode()
+            f"{(job['company'] or '').lower()}|{(job['title'] or '').lower()}".encode()
         ).hexdigest()
         prev = seen.get(fp)
-        if prev is None or (job["posted"] or "") > (prev["posted"] or ""):
+        if prev is None or rank(job) > rank(prev):
             seen[fp] = job
     return list(seen.values())
 
@@ -211,6 +267,8 @@ def score_job(job: dict, profile: dict, exclude_terms: list[str],
     desc = (job["description"] or "").lower()[:6000]
     if any(term in title for term in exclude_terms):
         return -1
+    if FOREIGN_REGION_RE.search(f"{title} {job['location'] or ''}"):
+        return -1
     score = 0.0
     for pattern, (name, weight) in SKILL_LEXICON.items():
         if name not in profile["skills"]:
@@ -227,6 +285,9 @@ def score_job(job: dict, profile: dict, exclude_terms: list[str],
             score += 5
     if any(rt in title for rt in profile["role_titles"]):
         score += 10
+    location = (job["location"] or "").lower()
+    if "wien" in location or "vienna" in location or "at13" in location:
+        score += 8  # Vienna preferred
     posted = job.get("posted") or ""
     if posted >= (date.today() - timedelta(days=3)).isoformat():
         score += 8
@@ -251,19 +312,7 @@ def llm_rerank(jobs: list[dict], profile: dict, api_key: str) -> None:
         '[{"i": <index>, "fit": <0-100>, "reason": "<max 12 words>"}]\n\nJobs:\n' + summary
     )
     try:
-        resp = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": NVIDIA_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 1500,
-            },
-            timeout=90,
-        )
-        resp.raise_for_status()
-        text = resp.json()["choices"][0]["message"]["content"]
+        text = nvidia_chat(api_key, prompt, max_tokens=1500)
         match = re.search(r"\[.*\]", text, re.DOTALL)
         for entry in json.loads(match.group(0)):
             idx = entry.get("i")
@@ -295,7 +344,9 @@ def esc(text: str) -> str:
 def format_message(jobs: list[dict], args: argparse.Namespace) -> str:
     lines = [
         f"<b>🎯 Job Scout — top {len(jobs)} CV matches</b>",
-        f"<i>{', '.join(args.countries)} · last {args.days}d"
+        f"<i>{', '.join(args.countries)}"
+        + (f" + remote-{args.remote}" if args.remote != "off" else "")
+        + f" · last {args.days}d"
         + (f" · min €{args.min_salary:,}" if args.min_salary else "") + "</i>",
         "",
     ]
@@ -354,9 +405,10 @@ def parse_args() -> argparse.Namespace:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--countries", default="AT",
                         help="comma-separated ISO codes: AT,DE,CH (default AT)")
-    parser.add_argument("--min-salary", type=int, default=0,
-                        help="min annual EUR; jobs with a LOWER parsed salary are dropped "
-                             "(jobs without salary info are kept unless --require-salary)")
+    parser.add_argument("--min-salary", type=int, default=85000,
+                        help="min annual EUR (default 85000); jobs with a LOWER parsed salary "
+                             "are dropped (jobs without salary info are kept unless "
+                             "--require-salary; 0 disables)")
     parser.add_argument("--require-salary", action="store_true",
                         help="drop jobs with no parseable salary")
     parser.add_argument("--days", type=int, default=14, help="recency window (default 14)")
@@ -366,8 +418,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--keywords", default="", help="comma-separated boost terms")
     parser.add_argument("--exclude", default="intern,praktik,werkstudent,student",
                         help="comma-separated title terms to drop")
-    parser.add_argument("--no-remote", dest="include_remote", action="store_false",
-                        help="exclude remote-EU jobs")
+    parser.add_argument("--remote", choices=["off", "eu", "global"], default="global",
+                        help="include remote jobs: off, eu-only, or global (default global; "
+                             "global drops US/Canada/LATAM/APAC-restricted ads)")
     parser.add_argument("--cv", type=Path, default=DEFAULT_CV)
     parser.add_argument("--rebuild-profile", action="store_true",
                         help="re-extract the profile from the CV")
@@ -390,8 +443,11 @@ def main() -> int:
     profile = load_profile(args.cv, args.rebuild_profile)
     log(f"querying {len(slices)} slices for {args.countries}, last {args.days}d …")
     jobs = fetch_jobs(slices, args.countries, args.days,
-                      profile["role_titles"], args.include_remote)
+                      profile["role_titles"], args.remote)
     log(f"{len(jobs)} raw rows")
+    if args.remote != "off":
+        jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
+        log(f"{len(jobs)} after remote-reachability filter")
     jobs = dedupe(jobs)
 
     if args.min_salary or args.require_salary:
@@ -407,8 +463,9 @@ def main() -> int:
 
     for job in jobs:
         job["score"] = score_job(job, profile, exclude_terms, extra_keywords)
+    rerank_pool = max(args.top * 3, 30)
     jobs = sorted((j for j in jobs if j["score"] > 0),
-                  key=lambda j: j["score"], reverse=True)[: args.top]
+                  key=lambda j: j["score"], reverse=True)[:rerank_pool]
     log(f"{len(jobs)} jobs after dedupe/filter/score")
     if not jobs:
         log("no matches — widen --days, --countries or --slices")
@@ -417,6 +474,7 @@ def main() -> int:
     api_key = os.environ.get("NVIDIA_API_KEY")
     if api_key and not args.no_llm:
         llm_rerank(jobs, profile, api_key)
+    jobs = jobs[: args.top]
 
     message = format_message(jobs, args)
     if args.dry_run:
