@@ -28,8 +28,10 @@ import requests
 
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
-DEFAULT_SLICES = ["eures", "personio", "recruitee", "greenhouse", "lever", "ashby"]
+DEFAULT_SLICES = ["eures", "personio", "recruitee", "greenhouse", "lever", "ashby",
+                  "join_com", "remoteok", "weworkremotely"]
 BIG_SLICES = ["workday", "successfactors", "smartrecruiters", "teamtailor", "workable"]
+API_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) job-scout/1.0"}
 
 DEFAULT_CV = Path.home() / "Documents" / "Vlad_Brincoveanu_CV_2026.pdf"
 PROFILE_PATH = Path(__file__).resolve().parent.parent / "data" / "profile.json"
@@ -192,6 +194,71 @@ def fetch_jobs(slices: list[str], countries: list[str], days: int,
     rows = con.execute(query).fetchall()
     cols = [d[0] for d in con.description]
     return [dict(zip(cols, r)) for r in rows]
+
+
+def _api_get(url: str) -> dict | None:
+    try:
+        resp = requests.get(url, headers=API_UA, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001 - free APIs may flake; never block the run
+        log(f"API source failed, skipping: {url.split('/')[2]} ({exc})")
+        return None
+
+
+def _title_matches(title: str, role_titles: list[str]) -> bool:
+    lower = (title or "").lower()
+    return any(rt in lower for rt in role_titles)
+
+
+def fetch_free_apis(days: int, role_titles: list[str]) -> list[dict]:
+    """Live free job APIs (no auth): Arbeitnow (DACH), Remotive + Jobicy (remote)."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    jobs: list[dict] = []
+
+    def add(ats: str, title, company, location, is_remote, posted, url,
+            description="", salary_summary=None, salary_min=None,
+            salary_max=None, salary_currency=None):
+        if not _title_matches(title, role_titles) or (posted or "") < cutoff:
+            return
+        jobs.append({
+            "url": url, "title": title, "company": company, "ats_type": ats,
+            "location": location, "is_remote": str(is_remote).lower(),
+            "country_iso": None, "salary_min": salary_min, "salary_max": salary_max,
+            "salary_currency": salary_currency, "salary_period": "year",
+            "salary_summary": salary_summary, "employment_type": None,
+            "description": description, "posted": posted, "apply_url": url,
+        })
+
+    for page in (1, 2, 3):
+        data = _api_get(f"https://www.arbeitnow.com/api/job-board-api?page={page}")
+        if not data:
+            break
+        for j in data.get("data", []):
+            posted = date.fromtimestamp(j.get("created_at", 0)).isoformat()
+            add("arbeitnow", j.get("title"), j.get("company_name"), j.get("location"),
+                j.get("remote", False), posted, j.get("url"),
+                description=re.sub(r"<[^>]+>", " ", j.get("description") or "")[:6000])
+
+    data = _api_get("https://remotive.com/api/remote-jobs?limit=100")
+    for j in (data or {}).get("jobs", []):
+        add("remotive", j.get("title"), j.get("company_name"),
+            j.get("candidate_required_location") or "Remote", True,
+            (j.get("publication_date") or "")[:10], j.get("url"),
+            description=re.sub(r"<[^>]+>", " ", j.get("description") or "")[:6000],
+            salary_summary=j.get("salary") or None)
+
+    data = _api_get("https://jobicy.com/api/v2/remote-jobs?count=50")
+    for j in (data or {}).get("jobs", []):
+        add("jobicy", j.get("jobTitle"), j.get("companyName"),
+            j.get("jobGeo") or "Remote", True, (j.get("pubDate") or "")[:10],
+            j.get("url"), description=re.sub(r"<[^>]+>", " ", j.get("jobDescription")
+                                             or j.get("jobExcerpt") or "")[:6000],
+            salary_min=j.get("annualSalaryMin"), salary_max=j.get("annualSalaryMax"),
+            salary_currency=j.get("salaryCurrency"))
+
+    log(f"{len(jobs)} rows from free APIs (arbeitnow/remotive/jobicy)")
+    return jobs
 
 
 # Region restrictions that show up in titles rather than the location field.
@@ -425,6 +492,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebuild-profile", action="store_true",
                         help="re-extract the profile from the CV")
     parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
+    parser.add_argument("--no-apis", action="store_true",
+                        help="skip live free APIs (arbeitnow, remotive, jobicy)")
     parser.add_argument("--telegram", choices=["dev", "main"], default="dev",
                         help="which immo-scouter bot to use (default dev)")
     parser.add_argument("--telegram-config", type=Path, default=IMMO_CONFIG)
@@ -444,7 +513,9 @@ def main() -> int:
     log(f"querying {len(slices)} slices for {args.countries}, last {args.days}d …")
     jobs = fetch_jobs(slices, args.countries, args.days,
                       profile["role_titles"], args.remote)
-    log(f"{len(jobs)} raw rows")
+    log(f"{len(jobs)} raw rows from jobhive")
+    if not args.no_apis:
+        jobs += fetch_free_apis(args.days, profile["role_titles"])
     if args.remote != "off":
         jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
         log(f"{len(jobs)} after remote-reachability filter")
