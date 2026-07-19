@@ -31,8 +31,9 @@ import requests
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
 DEFAULT_SLICES = ["eures", "personio", "recruitee", "greenhouse", "lever", "ashby",
-                  "join_com", "remoteok", "weworkremotely"]
-BIG_SLICES = ["workday", "successfactors", "smartrecruiters", "teamtailor", "workable"]
+                  "join_com", "remoteok", "weworkremotely", "smartrecruiters",
+                  "teamtailor", "workable", "jobsch", "bundesagentur"]
+BIG_SLICES = ["workday", "successfactors"]  # huge (684k/290k rows) — opt in via --slices all
 API_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) job-scout/1.0"}
 
 DEFAULT_CV = Path.home() / "Documents" / "Vlad_Brincoveanu_CV_2026.pdf"
