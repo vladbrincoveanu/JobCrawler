@@ -83,3 +83,4 @@ pnpm-debug.log*
 # Postgres local data
 .pgdata/
 postgres-data/
+data/profile.json
