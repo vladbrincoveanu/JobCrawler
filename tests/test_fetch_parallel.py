@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from sources.at_common import fetch_parallel  # noqa: E402
+from sources.at_common import fetch_parallel
 
 
 def test_preserves_input_order_regardless_of_completion_order():

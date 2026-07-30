@@ -11,7 +11,7 @@ the pipeline (recency cutoff, reachable_from_home) can read them.
 """
 
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,10 +19,18 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import scout  # noqa: E402
+import scout
 
 ROLE_TITLES = ["backend", "software engineer"]
-TODAY = date.today()
+# date.today(), matching how scout.py itself computes its recency cutoff -- a
+# tz-aware "now" here would put the fixture on the wrong side of that cutoff
+# around midnight.
+TODAY = date.today()  # noqa: DTZ011
+
+
+def _epoch_at_noon(day: date) -> str:
+    """Himalayas delivers pubDate as a unix epoch in a *string*."""
+    return str(int(datetime.combine(day, time(12, 0)).timestamp()))
 
 
 def _himalayas_job(**over):
@@ -30,9 +38,7 @@ def _himalayas_job(**over):
         "title": "Senior Backend Engineer",
         "companyName": "ACME",
         "locationRestrictions": ["Austria", "Germany"],
-        "pubDate": str(int(
-            __import__("datetime").datetime.combine(
-                TODAY, __import__("datetime").time(12, 0)).timestamp())),
+        "pubDate": _epoch_at_noon(TODAY),
         "applicationLink": "https://himalayas.app/jobs/1",
         "description": "<p>Kafka and .NET</p>",
         "minSalary": 70000,
@@ -100,10 +106,8 @@ def test_himalayas_unparseable_date_does_not_crash_the_run(only_himalayas):
 
 
 def test_stale_rows_are_dropped_by_the_recency_cutoff(only_himalayas):
-    old = __import__("datetime").datetime.combine(
-        TODAY - timedelta(days=90), __import__("datetime").time(12, 0))
     only_himalayas["himalayas.app"] = {
-        "jobs": [_himalayas_job(pubDate=str(int(old.timestamp())))]
+        "jobs": [_himalayas_job(pubDate=_epoch_at_noon(TODAY - timedelta(days=90)))]
     }
     assert scout.fetch_free_apis(days=14, role_titles=ROLE_TITLES) == []
 
