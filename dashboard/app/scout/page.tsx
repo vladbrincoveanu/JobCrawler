@@ -116,8 +116,8 @@ function ScoutResults({ result }: { result: ScoutResult }) {
         <h2 className="text-lg font-semibold text-gray-900">
           {result.jobs.length} matches
         </h2>
-        <span className="text-xs text-gray-400">
-          profile: {result.profile_source ?? "unknown"} · generated{" "}
+        <span className="text-xs text-gray-400" data-testid="scout-provenance">
+          profile: {result.profile_source ?? "unknown"} · scanned{" "}
           {new Date(result.generated_at).toLocaleString()}
         </span>
       </div>
@@ -135,7 +135,7 @@ function ScoutResults({ result }: { result: ScoutResult }) {
                 Location
               </th>
               <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Score
+                Match
               </th>
               <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
                 Why matched
@@ -154,18 +154,50 @@ function ScoutResults({ result }: { result: ScoutResult }) {
   );
 }
 
+/** Colour the match by how much of the candidate's stack the ad actually asks
+ *  for, so a weak match reads as weak at a glance instead of as a blue badge
+ *  indistinguishable from a strong one. */
+function matchTone(pct: number): string {
+  if (pct >= 50) return "bg-green-50 text-green-700";
+  if (pct >= 25) return "bg-amber-50 text-amber-700";
+  return "bg-gray-100 text-gray-500";
+}
+
 function ScoutRow({ job }: { job: ScoutJob }) {
+  const pct = job.match_pct;
+  const matched = job.matched_skills ?? [];
   return (
     <tr data-testid="scout-job-row">
       <td className="px-4 py-2 text-sm text-gray-900">{job.title ?? "—"}</td>
       <td className="px-4 py-2 text-sm text-gray-700">{job.company ?? "—"}</td>
       <td className="px-4 py-2 text-sm text-gray-700">{job.location ?? "—"}</td>
       <td className="px-4 py-2 text-sm">
-        <span className="inline-flex items-center rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
-          {job.rank_score ?? job.fit ?? "—"}
+        <span
+          data-testid="scout-match-pct"
+          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${matchTone(pct ?? 0)}`}
+        >
+          {pct === null || pct === undefined ? "—" : `${pct}%`}
         </span>
       </td>
-      <td className="px-4 py-2 text-sm text-gray-500">{job.reason ?? "—"}</td>
+      <td className="px-4 py-2 text-sm text-gray-500">
+        {matched.length ? (
+          <span data-testid="scout-matched-skills" className="flex flex-wrap gap-1">
+            {matched.slice(0, 6).map((s) => (
+              <span
+                key={s}
+                className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600"
+              >
+                {s}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span className="text-xs italic text-gray-400">
+            no skills from your CV appear in this ad
+          </span>
+        )}
+        {job.reason && <div className="mt-1 text-xs">{job.reason}</div>}
+      </td>
       <td className="px-4 py-2 text-sm">
         {job.apply_url ? (
           <a

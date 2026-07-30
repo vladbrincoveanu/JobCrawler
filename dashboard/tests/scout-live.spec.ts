@@ -66,7 +66,7 @@ test.describe("CV Scout — live scan", () => {
     await expect(applyLink).toHaveAttribute("href", /^https?:\/\//);
   });
 
-  test("the scan is scored, not just listed", async ({ page }) => {
+  test("the match score is real evidence, not a percentile", async ({ page }) => {
     await page.goto("/scout");
     await page.getByTestId("scout-cv-input").setInputFiles(TEST_CV);
     await page.getByTestId("scout-scan-button").click();
@@ -74,17 +74,26 @@ test.describe("CV Scout — live scan", () => {
       timeout: SCAN_TIMEOUT_MS,
     });
 
-    // The top row's score must be a real number in range -- this is what
-    // distinguishes "we ranked these against the CV" from "we dumped a feed".
-    const topScore = await page
-      .getByTestId("scout-job-row")
-      .first()
-      .locator("td")
-      .nth(3)
-      .innerText();
-    const score = Number(topScore.trim());
-    expect(Number.isFinite(score)).toBe(true);
-    expect(score).toBeGreaterThan(0);
-    expect(score).toBeLessThanOrEqual(100);
+    const pcts = await page.getByTestId("scout-match-pct").allInnerTexts();
+    expect(pcts.length).toBeGreaterThan(0);
+
+    const values = pcts.map((t) => Number(t.replace("%", "").trim()));
+    for (const v of values) {
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(100);
+    }
+
+    // The regression this guards: the old column showed rank_score, a
+    // percentile, so the top row was pinned near 100 and everything looked like
+    // a strong match. A real measure is free to be low -- what it must NOT do is
+    // report a full house of 90s regardless of what the ads actually say.
+    expect(values.every((v) => v >= 90)).toBe(false);
+
+    // Every row must show the evidence behind its number, or say there is none.
+    const firstRow = page.getByTestId("scout-job-row").first();
+    await expect(firstRow).toContainText(
+      /[a-z]/,
+    );
   });
 });

@@ -445,6 +445,47 @@ def annual_salary_eur(job: dict) -> int | None:
         return None
 
 
+def match_evidence(job: dict, profile: dict) -> tuple[int, list[str]]:
+    """How much of THIS candidate's stack the ad actually asks for.
+
+    Returns (0-100, matched skill names, strongest first).
+
+    This exists because `rank_score` is not a fit measure and was being read as
+    one. rank_score is a percentile: the best job in any result set scores ~100
+    even when nothing in that set fits, so a scan that surfaced only generic
+    DevOps ads for a .NET-first candidate still displayed "97". The percentage
+    here is absolute instead -- it is the share of the profile's own skill
+    weight that the ad mentions, so an ad matching only "kubernetes" and
+    "docker" for a profile built around .NET/C# scores low and *stays* low no
+    matter what it is ranked against.
+
+    Title hits count double, not triple as in score_job: this number answers
+    "how much overlap is there", where a skill named in the title is stronger
+    evidence but not three whole skills' worth.
+    """
+    title = (job.get("title") or "").lower()
+    desc = (job.get("description") or "").lower()[:6000]
+    skills = profile.get("skills") or {}
+    total_weight = sum(skills.values())
+    if not total_weight:
+        return 0, []
+
+    earned = 0.0
+    hits: list[tuple[float, str]] = []
+    for pattern, (name, _lex_weight) in SKILL_LEXICON.items():
+        weight = skills.get(name)
+        if not weight:
+            continue
+        if re.search(pattern, title):
+            earned += weight * 2
+            hits.append((weight * 2, name))
+        elif re.search(pattern, desc):
+            earned += weight
+            hits.append((weight, name))
+    pct = min(100, round(100 * earned / total_weight))
+    return pct, [name for _, name in sorted(hits, reverse=True)]
+
+
 def score_job(job: dict, profile: dict, exclude_terms: list[str],
               extra_keywords: list[str]) -> float:
     title = (job["title"] or "").lower()
@@ -912,12 +953,21 @@ def main() -> int:
         # CV-upload-and-scan flow). Deliberately ignores the sent-jobs history --
         # that mechanism exists so the Telegram digest never repeats itself, but
         # "scan right now" should show every current match, seen before or not.
-        ranked = rank_jobs(list(jobs))
+        # rank_jobs attaches rank/rank_score and then returns the list ordered
+        # NEWEST-POSTED-FIRST, which is right for the backlog dashboards it was
+        # written for and wrong here: slicing [:limit] off a date-ordered list
+        # returned the most recent N ads, not the best-matching N, so a strong
+        # older match was silently dropped in favour of a fresh weak one. Take
+        # the top N by match quality, and present them that way.
+        ranked = sorted(rank_jobs(list(jobs)),
+                        key=lambda j: j.get("score", 0), reverse=True)
         limit = max(args.top, 20) if args.top else len(ranked)
         output_jobs = ranked[:limit]
         api_key = os.environ.get("NVIDIA_API_KEY")
         if api_key and not args.no_llm and output_jobs:
             llm_rerank(output_jobs, profile, api_key)
+        for job in output_jobs:
+            job["match_pct"], job["matched_skills"] = match_evidence(job, profile)
         result = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "cv": str(args.cv),
@@ -935,6 +985,12 @@ def main() -> int:
                     "score": j.get("score"),
                     "rank": j.get("rank"),
                     "rank_score": j.get("rank_score"),
+                    # The honest fit number and the evidence behind it. Read
+                    # match_pct, not rank_score: see match_evidence().
+                    "match_pct": j.get("match_pct"),
+                    "matched_skills": j.get("matched_skills") or [],
+                    "profile_skills": sorted((profile.get("skills") or {}),
+                                             key=lambda s: -profile["skills"][s]),
                     "fit": j.get("fit"),
                     "reason": j.get("reason"),
                     "bucket": j.get("bucket"),

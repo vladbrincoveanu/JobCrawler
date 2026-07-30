@@ -65,7 +65,16 @@ export interface ScoutJob {
   apply_url: string | null;
   score: number | null;
   rank: number | null;
+  /** Percentile within this result set — the BEST job always scores ~100 even
+   *  when nothing in the set fits. Not a fit measure; don't show it as one. */
   rank_score: number | null;
+  /** Share of the candidate's own skill weight the ad actually asks for. This
+   *  is the number to display. */
+  match_pct: number | null;
+  /** Which profile skills the ad mentioned, strongest first. */
+  matched_skills: string[];
+  /** The profile's skills, strongest first — lets the UI say what was missed. */
+  profile_skills: string[];
   fit: number | null;
   reason: string | null;
   bucket: string | null;
