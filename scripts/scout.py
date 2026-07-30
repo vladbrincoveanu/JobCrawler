@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""CV-matched job scout: query jobhive ATS dataset, score against a CV profile,
-send the top matches as a Telegram message.
+"""CV-matched job scout: pull jobs from the jobhive ATS dataset, free remote-job
+APIs and karriere.at, score them against a CV profile, and send the top matches
+as a Telegram message.
 
 Default run (dry):    python scripts/scout.py --dry-run
 Send to dev bot:      python scripts/scout.py
@@ -8,6 +9,21 @@ Defaults: AT (Vienna boosted) + remote EU/global, min €85k (unknown salaries k
 top 5, never resends a job already delivered. Dashboard: data/dashboard.html
 (regenerated on every send — open it directly in a browser, no server needed).
 Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
+
+Sources (--sources, default all three):
+  jobhive   international ATS parquet slices (needs duckdb)
+  apis      arbeitnow / remotive / jobicy
+  karriere  karriere.at, Austria's largest board — Wien + Austria-wide remote
+
+CV buckets: every job is tagged with WHICH of the four CV variants to send,
+scored against the keyword files in career/Resume/JOB-SEARCH/keywords/ (the same
+files kwcount.py audits the CVs against). See data/buckets.json.
+  Only bucket C, karriere.at only:
+      python scripts/scout.py --dry-run --sources karriere --buckets C
+
+Note: Austrian ads commonly quote €45–70k gross. The default --min-salary 85000
+therefore drops most karriere.at rows that state a salary (ads with no salary are
+still kept). Lower it to see the Austrian mid-market.
 
 Telegram credentials: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars, or fallback
 to immo-scouter's config.json (--telegram dev|main selects the bot there).
@@ -25,8 +41,11 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import duckdb
 import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import buckets as buckets_mod  # noqa: E402
+from sources import karriere_at  # noqa: E402
 
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
@@ -164,6 +183,10 @@ def load_profile(cv_path: Path, rebuild: bool) -> dict:
 
 def fetch_jobs(slices: list[str], countries: list[str], days: int,
                role_titles: list[str], remote: str) -> list[dict]:
+    # Imported here, not at module scope: duckdb is only needed for the jobhive
+    # parquet slices, so `--sources karriere` runs without it installed.
+    import duckdb
+
     urls = [f"{JOBHIVE_BASE}/{s}/jobs.parquet" for s in slices]
     cutoff = (date.today() - timedelta(days=days)).isoformat()
 
@@ -438,12 +461,16 @@ def generate_dashboard(sent: dict) -> None:
 
     def row(rec) -> str:
         if not isinstance(rec, dict):  # legacy entries from before the dashboard existed
-            return f"<tr><td>{esc(rec)}</td><td colspan=6>(sent before dashboard tracking started)</td></tr>"
+            return f"<tr><td>{esc(rec)}</td><td colspan=9>(sent before dashboard tracking started)</td></tr>"
         link = f'<a href="{esc(rec["apply_url"])}" target="_blank">apply</a>' if rec.get("apply_url") else ""
         salary = f"€{rec['salary']:,}" if isinstance(rec.get("salary"), int) else esc(rec.get("salary"))
+        bucket = esc(rec.get("bucket"))
+        if bucket and rec.get("bucket_fit") != "":
+            bucket = f"{bucket} <span class=dim>{esc(rec.get('bucket_fit'))}%</span>"
         return (f"<tr><td>{esc(rec.get('sent_date'))}</td><td>{esc(rec.get('title'))}</td>"
                 f"<td>{esc(rec.get('company'))}</td><td>{esc(rec.get('location'))}</td>"
-                f"<td>{salary}</td><td>{esc(rec.get('fit'))}</td>"
+                f"<td>{salary}</td><td>{bucket}</td><td>{esc(rec.get('source'))}</td>"
+                f"<td>{esc(rec.get('fit'))}</td>"
                 f"<td>{esc(rec.get('posted'))}</td><td>{link}</td></tr>")
 
     ordered = sorted(sent.items(),
@@ -459,11 +486,12 @@ table{{border-collapse:collapse;width:100%;font-size:13px}}
 th,td{{padding:6px 10px;border-bottom:1px solid #222;text-align:left;vertical-align:top}}
 th{{color:#9ab;position:sticky;top:0;background:#0b0d10}}
 tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
+.dim{{color:#888}}
 </style></head><body>
 <h1>Job Scout — sent history</h1>
 <div class="meta">{len(sent)} jobs ever sent · generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
 <table><thead><tr><th>Sent</th><th>Title</th><th>Company</th><th>Location</th>
-<th>Salary</th><th>Fit</th><th>Posted</th><th></th></tr></thead>
+<th>Salary</th><th>CV</th><th>Source</th><th>Fit</th><th>Posted</th><th></th></tr></thead>
 <tbody>{rows_html}</tbody></table>
 </body></html>"""
     DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -510,6 +538,9 @@ def format_message(jobs: list[dict], args: argparse.Namespace) -> str:
         if job.get("fit") is not None:
             meta += f" · fit {job['fit']}/100"
         parts.append(meta)
+        if job.get("bucket"):
+            parts.append(f"📄 send <b>{esc(job['bucket'])}</b> — "
+                         f"{esc(job['bucket_label'])} ({job['bucket_fit']}%)")
         if job.get("reason"):
             parts.append(f"<i>{esc(job['reason'])}</i>")
         link = job.get("apply_url") or job.get("url")
@@ -571,6 +602,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
     parser.add_argument("--no-apis", action="store_true",
                         help="skip live free APIs (arbeitnow, remotive, jobicy)")
+    parser.add_argument("--sources", default="jobhive,apis,karriere",
+                        help="comma-separated: jobhive, apis, karriere (default all)")
+    parser.add_argument("--buckets", default="",
+                        help="restrict CV variants, e.g. A,C (default: all in "
+                             "data/buckets.json)")
+    parser.add_argument("--karriere-locations", default="wien,",
+                        help="karriere.at location slugs; an empty entry means "
+                             "Austria-wide, which is how remote ads are reached "
+                             "(default 'wien,' = Wien + Austria-wide)")
+    parser.add_argument("--karriere-max-detail", type=int, default=60,
+                        help="max karriere.at detail pages to fetch for "
+                             "descriptions/salary (default 60)")
     parser.add_argument("--no-dedup", action="store_true",
                         help="don't skip jobs already sent in a previous run")
     parser.add_argument("--reset-sent", action="store_true",
@@ -590,13 +633,27 @@ def main() -> int:
     slices = DEFAULT_SLICES + BIG_SLICES if args.slices == "all" else \
         [s.strip() for s in args.slices.split(",") if s.strip()]
 
+    sources = {s.strip().lower() for s in args.sources.split(",") if s.strip()}
+    bucket_filter = [b.strip().upper() for b in args.buckets.split(",") if b.strip()]
+    cv_buckets = buckets_mod.load_buckets(only=bucket_filter or None)
+
     profile = load_profile(args.cv, args.rebuild_profile)
-    log(f"querying {len(slices)} slices for {args.countries}, last {args.days}d …")
-    jobs = fetch_jobs(slices, args.countries, args.days,
-                      profile["role_titles"], args.remote)
-    log(f"{len(jobs)} raw rows from jobhive")
-    if not args.no_apis:
+    jobs: list[dict] = []
+
+    if "jobhive" in sources:
+        log(f"querying {len(slices)} slices for {args.countries}, last {args.days}d …")
+        jobs += fetch_jobs(slices, args.countries, args.days,
+                           profile["role_titles"], args.remote)
+        log(f"{len(jobs)} raw rows from jobhive")
+    if "apis" in sources and not args.no_apis:
         jobs += fetch_free_apis(args.days, profile["role_titles"])
+    if "karriere" in sources:
+        # Locations are split without dropping empties: a trailing comma in
+        # "wien," is the deliberate Austria-wide arm, not a typo.
+        locations = [loc.strip() for loc in args.karriere_locations.split(",")]
+        jobs += karriere_at.fetch(
+            buckets_mod.all_search_terms(cv_buckets), locations,
+            days=args.days, max_detail=args.karriere_max_detail)
     if args.remote != "off":
         jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
         log(f"{len(jobs)} after remote-reachability filter")
@@ -613,6 +670,7 @@ def main() -> int:
                 kept.append(job)
         jobs = kept
 
+    buckets_mod.annotate(jobs, cv_buckets)
     for job in jobs:
         job["score"] = score_job(job, profile, exclude_terms, extra_keywords)
     jobs = sorted((j for j in jobs if j["score"] > 0), key=lambda j: j["score"], reverse=True)
@@ -650,6 +708,8 @@ def main() -> int:
             "location": job.get("location") or "", "posted": job.get("posted") or "",
             "salary": annual_salary_eur(job) or job.get("salary_summary") or "",
             "fit": job.get("fit", ""), "apply_url": job.get("apply_url") or job.get("url") or "",
+            "source": job.get("ats_type") or "",
+            "bucket": job.get("bucket") or "", "bucket_fit": job.get("bucket_fit", ""),
         }
     save_sent(sent)
     generate_dashboard(sent)
