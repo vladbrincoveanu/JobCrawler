@@ -141,3 +141,17 @@ def test_slugify_drops_dots_unlike_karriere():
 ])
 def test_scope_filter_keeps_wien_and_remote_only(location, remote, expected):
     assert s.in_scope({"location": location, "is_remote": remote}, ["wien", ""]) is expected
+
+
+def test_inline_style_block_is_not_read_as_text():
+    """Regression from a live run: StepStone inlines an emotion <style> block
+    inside some title anchors. Stripping tags alone leaves the CSS behind, and a
+    job landed on the dashboard titled ".res-xrpel9{box-sizing:border-box…}"."""
+    chunk = ('<article id="job-item-1"><a href="/stellenangebote--x--1-inline.html" '
+             'data-at="job-item-title"><style data-emotion="res x">'
+             '.res-xrpel9{box-sizing:border-box;margin:0}</style>'
+             '<div>Cloud Engineer (m/w/d)</div></a>'
+             '<span data-at="job-item-company-name">ACME GmbH</span></article>')
+    card = s.parse_cards(chunk, CAPTURED)[0]
+    assert card["title"] == "Cloud Engineer (m/w/d)"
+    assert "box-sizing" not in card["title"]

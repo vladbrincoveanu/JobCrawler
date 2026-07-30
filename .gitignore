@@ -85,4 +85,6 @@ pnpm-debug.log*
 postgres-data/
 data/profile.json
 data/sent_jobs.json
+data/dashboard.html
+data/dashboards/
 logs/

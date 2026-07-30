@@ -455,6 +455,7 @@ def llm_rerank(jobs: list[dict], profile: dict, api_key: str) -> None:
 # --------------------------------------------------------------------------- telegram
 
 DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "data" / "dashboard.html"
+CV_DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "data" / "dashboards"
 
 
 def generate_dashboard(sent: dict) -> None:
@@ -501,6 +502,120 @@ tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
     DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
     DASHBOARD_PATH.write_text(html)
     log(f"dashboard: file://{DASHBOARD_PATH}")
+
+
+def rank_jobs(jobs: list[dict]) -> list[dict]:
+    """Order jobs newest-posted-first and attach a 0-100 rank score.
+
+    Two orderings are in play and they are deliberately different. The LIST is
+    ordered by posting date, because a dashboard you check daily is useless if
+    last week's ad sits on top. The SCORE is the job's rank by match quality
+    within its own CV bucket, rescaled to 0-100 -- so the number answers "how
+    does this compare to the other jobs this CV can go for", not "what did the
+    keyword scorer happen to total". A bucket of 3 jobs and a bucket of 300 are
+    then readable on the same scale.
+
+    Jobs with no parseable posting date sort last: unknown is not fresh.
+    """
+    by_quality = sorted(jobs, key=lambda j: j.get("score", 0), reverse=True)
+    total = len(by_quality)
+    for position, job in enumerate(by_quality):
+        job["rank"] = position + 1
+        # Best job in the bucket scores 100; worst scores 100/total, never 0,
+        # because being last of many is not the same as being unmatched.
+        job["rank_score"] = round(100 * (total - position) / total) if total else 0
+    return sorted(by_quality,
+                  key=lambda j: (j.get("posted") or "", -j.get("rank", 0)),
+                  reverse=True)
+
+
+def _dashboard_page(title: str, subtitle: str, jobs: list[dict], nav: str) -> str:
+    def esc(text) -> str:
+        return (str(text or "").replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    def row(job: dict) -> str:
+        salary = annual_salary_eur(job)
+        salary_cell = f"€{salary:,}" if salary else '<span class=dim>—</span>'
+        link = (f'<a href="{esc(job.get("apply_url") or job.get("url"))}" target="_blank">apply ↗</a>'
+                if (job.get("apply_url") or job.get("url")) else "")
+        remote = ' <span class="tag">remote</span>' if (job.get("is_remote") or "").lower() == "true" else ""
+        return (f'<tr><td class=mono>{esc(job.get("posted") or "?")}</td>'
+                f'<td>{esc(job.get("title"))}{remote}</td>'
+                f'<td>{esc(job.get("company"))}</td>'
+                f'<td>{esc(job.get("location"))}</td>'
+                f'<td>{salary_cell}</td>'
+                f'<td class=mono>{esc(job.get("source") or job.get("ats_type"))}</td>'
+                f'<td class=mono>#{job.get("rank", "?")}</td>'
+                f'<td class=mono><b>{job.get("rank_score", 0)}</b></td>'
+                f'<td>{link}</td></tr>')
+
+    rows = "\n".join(row(j) for j in jobs) or \
+        '<tr><td colspan=9 class=dim>no jobs matched this CV in the last run</td></tr>'
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{esc(title)}</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d10;color:#e6e6e6;padding:24px}}
+h1{{font-size:18px;margin:0 0 4px}} .meta{{color:#888;margin-bottom:16px;font-size:13px}}
+nav{{margin:0 0 18px;font-size:13px}} nav a{{margin-right:14px}}
+nav a.on{{color:#e6e6e6;font-weight:600;border-bottom:2px solid #7dc4ff}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{padding:6px 10px;border-bottom:1px solid #222;text-align:left;vertical-align:top}}
+th{{color:#9ab;position:sticky;top:0;background:#0b0d10}}
+tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
+.dim{{color:#888}} .mono{{font-variant-numeric:tabular-nums;color:#9ab}}
+.tag{{font-size:11px;color:#7dc4ff;border:1px solid #2a3a4a;border-radius:3px;padding:0 4px}}
+</style></head><body>
+<h1>{esc(title)}</h1>
+<div class="meta">{esc(subtitle)}</div>
+<nav>{nav}</nav>
+<table><thead><tr><th>Posted</th><th>Title</th><th>Company</th><th>Location</th>
+<th>Salary</th><th>Source</th><th>Rank</th><th>Score</th><th></th></tr></thead>
+<tbody>{rows}</tbody></table>
+</body></html>"""
+
+
+def generate_cv_dashboards(jobs: list[dict], cv_buckets: list, args) -> None:
+    """One dashboard per CV variant, listing every job that CV can go for.
+
+    These show ALL available matches from this run, not just the handful sent to
+    Telegram -- the Telegram message is a daily digest, these are the backlog you
+    actually work through. data/dashboard.html (sent history) stays as it was.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    by_bucket = {bucket.id: [] for bucket in cv_buckets}
+    for job in jobs:
+        if job.get("bucket") in by_bucket:
+            by_bucket[job["bucket"]].append(job)
+
+    pages = [("index", "All CVs", None)] + \
+        [(f"cv-{b.id}", f"{b.id} — {b.label}", b) for b in cv_buckets]
+
+    def nav_for(current: str) -> str:
+        return "".join(
+            f'<a class="{"on" if slug == current else ""}" href="{slug}.html">'
+            f'{label.replace("&", "&amp;")}</a>'
+            for slug, label, _ in pages)
+
+    CV_DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+    for bucket in cv_buckets:
+        ranked = rank_jobs(list(by_bucket[bucket.id]))
+        subtitle = (f"{len(ranked)} available jobs · CV: {bucket.cv} · "
+                    f"newest first · score = rank within this CV · generated {stamp}")
+        (CV_DASHBOARD_DIR / f"cv-{bucket.id}.html").write_text(
+            _dashboard_page(f"{bucket.id} — {bucket.label}", subtitle, ranked,
+                            nav_for(f"cv-{bucket.id}")), encoding="utf-8")
+
+    # The index ranks every job against every other, regardless of CV, so the
+    # per-CV pages stay the place where the score means "best fit for this CV".
+    everything = rank_jobs([j for j in jobs if j.get("bucket") in by_bucket])
+    counts = ", ".join(f"{b.id}: {len(by_bucket[b.id])}" for b in cv_buckets)
+    subtitle = (f"{len(everything)} available jobs across {len(cv_buckets)} CVs "
+                f"({counts}) · last {args.days}d · newest first · generated {stamp}")
+    (CV_DASHBOARD_DIR / "index.html").write_text(
+        _dashboard_page("Job Scout — all CVs", subtitle, everything, nav_for("index")),
+        encoding="utf-8")
+    log(f"CV dashboards: file://{CV_DASHBOARD_DIR / 'index.html'}")
 
 
 def resolve_telegram(target: str, config_path: Path) -> tuple[str, str]:
@@ -694,6 +809,11 @@ def main() -> int:
         job["score"] = score_job(job, profile, exclude_terms, extra_keywords)
     jobs = sorted((j for j in jobs if j["score"] > 0), key=lambda j: j["score"], reverse=True)
     log(f"{len(jobs)} jobs after dedupe/filter/score")
+
+    # Built from the full scored set, BEFORE the already-sent filter and the
+    # --top cut: the dashboards are the backlog, the Telegram message is the
+    # daily digest off the top of it.
+    generate_cv_dashboards(jobs, cv_buckets, args)
 
     sent = {} if args.reset_sent else load_sent()
     if not args.no_dedup:

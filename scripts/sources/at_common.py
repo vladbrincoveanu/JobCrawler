@@ -14,6 +14,10 @@ import re
 
 TAG_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
+# <style>/<script> bodies are TEXT, so stripping tags alone leaves the CSS or JS
+# behind. StepStone inlines an emotion <style> block inside some title anchors,
+# which put ".res-xrpel9{box-sizing:border-box…}" in a job title on a live run.
+NON_CONTENT_RE = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
 
 ENTITIES = {
     "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'",
@@ -42,7 +46,8 @@ LOCATION_ALIASES = {"wien": ("wien", "vienna"), "vienna": ("wien", "vienna")}
 
 def clean(raw: str) -> str:
     """Strip tags, decode the entities these boards actually emit, squash space."""
-    text = TAG_RE.sub(" ", raw or "")
+    text = NON_CONTENT_RE.sub(" ", raw or "")
+    text = TAG_RE.sub(" ", text)
     for entity, char in ENTITIES.items():
         text = text.replace(entity, char)
     text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
