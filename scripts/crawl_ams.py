@@ -20,10 +20,8 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import Page, async_playwright
 
 from crawler.storage import repository as repo
 from crawler.storage.db import connect
@@ -58,7 +56,7 @@ async def _submit_search(page: Page, query: str) -> None:
         print(f"[ams] no suggestion clicked: {e}")
     await page.wait_for_timeout(1000)
     await page.locator('button:has-text("Suchen")').first.click()
-    print(f"[ams] clicked Suchen, waiting for results...")
+    print("[ams] clicked Suchen, waiting for results...")
     await page.wait_for_url(f"**{AMS_RESULTS_PATH}*", timeout=30000)
     await page.wait_for_timeout(4000)
 

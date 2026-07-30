@@ -21,6 +21,16 @@ dev = [
     "respx>=0.21",
     "ruff>=0.5",
 ]
+# scripts/scout.py + scripts/buckets.py + scripts/sources/* (the CV-matching
+# scout tool, shelled out to by dashboard/app/api/scout/route.ts) are a
+# separate CLI from the crawler/dashboard and need their own runtime deps,
+# which were previously undeclared -- `pip install -e ".[dev]"` per the
+# README never actually got you a working scout.py.
+scout = [
+    "requests>=2.31",
+    "duckdb>=1.0",
+    "pypdf>=4.2",
+]
 
 [build-system]
 requires = ["hatchling"]

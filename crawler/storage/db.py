@@ -10,12 +10,9 @@ timeouts. PRAGMAs here are PG session settings applied on connect.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import psycopg
 from psycopg_pool import ConnectionPool
-
-from crawler import config
 
 # Module-level pool, lazy-initialized.
 _pool: ConnectionPool | None = None

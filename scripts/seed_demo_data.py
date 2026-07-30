@@ -12,17 +12,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from crawler.storage import repository as repo
 
 
 def _ts(offset_minutes: int = 0) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(minutes=offset_minutes)
+    return datetime.now(UTC) - timedelta(minutes=offset_minutes)
 
 
 JOBS = [

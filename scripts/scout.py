@@ -10,13 +10,17 @@ resends a job already delivered. Dashboard: data/dashboard.html
 (regenerated on every send — open it directly in a browser, no server needed).
 Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
 
-Sources (--sources, default all four):
+Sources (--sources; the first four are the default):
   jobhive    international ATS parquet slices (needs duckdb)
-  apis       arbeitnow / remotive / jobicy
+  apis       arbeitnow / remotive / jobicy / himalayas — free, no key
   karriere   karriere.at, Austria's largest board — Wien + Austria-wide remote
   stepstone  StepStone.at — same coverage area, listing-only (detail pages are
              WAF-blocked, so these rows carry a teaser instead of a full ad text
              and almost never a salary)
+  adzuna     Adzuna aggregator — needs ADZUNA_APP_ID + ADZUNA_APP_KEY
+  jooble     Jooble aggregator — needs JOOBLE_API_KEY
+The last two are opt-in because they need a (free) key; naming one without its
+key set logs a skip and continues, so a keyless checkout still scans.
 
 CV buckets: every job is tagged with WHICH of the four CV variants to send,
 scored against the keyword files in career/Resume/JOB-SEARCH/keywords/ (the same
@@ -48,8 +52,8 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import buckets as buckets_mod  # noqa: E402
-from sources import karriere_at, stepstone_at  # noqa: E402
+import buckets as buckets_mod
+from sources import job_apis, karriere_at, stepstone_at
 
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
@@ -58,6 +62,9 @@ DEFAULT_SLICES = ["eures", "personio", "recruitee", "greenhouse", "lever", "ashb
                   "teamtailor", "workable", "jobsch", "bundesagentur"]
 BIG_SLICES = ["workday", "successfactors"]  # huge (684k/290k rows) — opt in via --slices all
 API_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) job-scout/1.0"}
+
+# Himalayas serves 20 rows a page regardless of `limit`.
+HIMALAYAS_PAGES = 5
 
 DEFAULT_CV = Path.home() / "Documents" / "Vlad_Brincoveanu_CV_2026.pdf"
 PROFILE_PATH = Path(__file__).resolve().parent.parent / "data" / "profile.json"
@@ -166,9 +173,25 @@ def build_profile_with_llm(cv_text: str, api_key: str) -> dict | None:
     return None
 
 
+def _profile_cache_path(cv_path: Path) -> Path:
+    """Cache key is the CV's own content hash, not a single shared file.
+
+    Previously every call reused data/profile.json regardless of which CV was
+    passed via --cv: the very first cached run "won" forever, silently reusing
+    a stale (or a *different person's*) profile for any later --cv. That's
+    fatal for the web CV-upload flow, where every upload should be scored
+    against its own content. Hashing the bytes also means uploading the same
+    CV twice for a quick re-scan is still cheap (no signature required for the
+    default personal CV to keep behaving exactly as before).
+    """
+    digest = hashlib.sha256(cv_path.read_bytes()).hexdigest()[:16]
+    return PROFILE_PATH.parent / "profiles" / f"{digest}.json"
+
+
 def load_profile(cv_path: Path, rebuild: bool) -> dict:
-    if PROFILE_PATH.exists() and not rebuild:
-        return json.loads(PROFILE_PATH.read_text())
+    cache_path = _profile_cache_path(cv_path)
+    if cache_path.exists() and not rebuild:
+        return json.loads(cache_path.read_text())
     log(f"building profile from {cv_path}")
     cv_text = extract_cv_text(cv_path)
     profile = None
@@ -177,8 +200,8 @@ def load_profile(cv_path: Path, rebuild: bool) -> dict:
         profile = build_profile_with_llm(cv_text, api_key)
     if profile is None:
         profile = build_profile_from_lexicon(cv_text)
-    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROFILE_PATH.write_text(json.dumps(profile, indent=2))
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(profile, indent=2))
     log(f"profile saved ({profile['source']}): {len(profile['skills'])} skills")
     return profile
 
@@ -243,7 +266,17 @@ def _title_matches(title: str, role_titles: list[str]) -> bool:
 
 
 def fetch_free_apis(days: int, role_titles: list[str]) -> list[dict]:
-    """Live free job APIs (no auth): Arbeitnow (DACH), Remotive + Jobicy (remote)."""
+    """Live free job APIs, none of which need a key or an account.
+
+    Arbeitnow (DACH-focused), Remotive, Jobicy, RemoteOK and Himalayas (all
+    remote-first). The remote boards are worth having despite the Austrian
+    focus: reachable_from_home() keeps only the EU/worldwide ads, and those are
+    exactly the roles a Vienna-based candidate can take without relocating.
+
+    The Muse's public API was evaluated and deliberately left out -- its
+    unfiltered feed is dominated by US healthcare and retail postings over a
+    year old, which is noise this scorer would have to fight rather than signal.
+    """
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     jobs: list[dict] = []
 
@@ -288,7 +321,31 @@ def fetch_free_apis(days: int, role_titles: list[str]) -> list[dict]:
             salary_min=j.get("annualSalaryMin"), salary_max=j.get("annualSalaryMax"),
             salary_currency=j.get("salaryCurrency"))
 
-    log(f"{len(jobs)} rows from free APIs (arbeitnow/remotive/jobicy)")
+    # Himalayas caps a page at 20 rows whatever `limit` says, so breadth comes
+    # from paging with `offset`.
+    for offset in range(0, HIMALAYAS_PAGES * 20, 20):
+        data = _api_get(f"https://himalayas.app/jobs/api?limit=20&offset={offset}")
+        rows = (data or {}).get("jobs", [])
+        if not rows:
+            break
+        for j in rows:
+            # pubDate is a unix epoch as a string; locationRestrictions is a
+            # list of countries, empty meaning worldwide.
+            try:
+                posted = date.fromtimestamp(int(j.get("pubDate") or 0)).isoformat()
+            except (ValueError, TypeError, OSError, OverflowError):
+                posted = ""
+            restrictions = j.get("locationRestrictions") or []
+            add("himalayas", j.get("title"), j.get("companyName"),
+                ", ".join(restrictions) if restrictions else "Worldwide", True,
+                posted, j.get("applicationLink"),
+                description=re.sub(r"<[^>]+>", " ",
+                                   j.get("description") or j.get("excerpt") or "")[:6000],
+                salary_min=j.get("minSalary"), salary_max=j.get("maxSalary"),
+                salary_currency=j.get("currency"))
+
+    log(f"{len(jobs)} rows from free APIs "
+        f"(arbeitnow/remotive/jobicy/himalayas)")
     return jobs
 
 
@@ -608,7 +665,9 @@ def generate_cv_dashboards(jobs: list[dict], cv_buckets: list, args) -> None:
 
     # The index ranks every job against every other, regardless of CV, so the
     # per-CV pages stay the place where the score means "best fit for this CV".
-    everything = rank_jobs([j for j in jobs if j.get("bucket") in by_bucket])
+    # With no buckets configured (e.g. the single-CV web-upload flow), every
+    # scored job belongs on the index -- there's no per-bucket filter to apply.
+    everything = rank_jobs([j for j in jobs if not cv_buckets or j.get("bucket") in by_bucket])
     counts = ", ".join(f"{b.id}: {len(by_bucket[b.id])}" for b in cv_buckets)
     subtitle = (f"{len(everything)} available jobs across {len(cv_buckets)} CVs "
                 f"({counts}) · last {args.days}d · newest first · generated {stamp}")
@@ -722,8 +781,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-apis", action="store_true",
                         help="skip live free APIs (arbeitnow, remotive, jobicy)")
     parser.add_argument("--sources", default="jobhive,apis,karriere,stepstone",
-                        help="comma-separated: jobhive, apis, karriere, stepstone "
-                             "(default all)")
+                        help="comma-separated: jobhive, apis, karriere, stepstone, "
+                             "adzuna, jooble. adzuna and jooble need API keys so "
+                             "they are off by default; naming them without the "
+                             "key set is a logged skip, not an error")
+    parser.add_argument("--jooble-locations", default="Wien,",
+                        help="Jooble location strings; an empty entry means "
+                             "country-wide (default 'Wien,')")
     parser.add_argument("--buckets", default="",
                         help="restrict CV variants, e.g. A,C (default: all in "
                              "data/buckets.json)")
@@ -749,6 +813,11 @@ def parse_args() -> argparse.Namespace:
                         help="which immo-scouter bot to use (default dev)")
     parser.add_argument("--telegram-config", type=Path, default=IMMO_CONFIG)
     parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
+    parser.add_argument("--json-out", type=Path, default=None,
+                        help="write the full ranked/scored match list as JSON to this "
+                             "path instead of sending Telegram or printing a digest "
+                             "(for programmatic callers, e.g. the dashboard's CV-upload "
+                             "flow); implies --dry-run and skips the sent-jobs history")
     return parser.parse_args()
 
 
@@ -762,7 +831,18 @@ def main() -> int:
 
     sources = {s.strip().lower() for s in args.sources.split(",") if s.strip()}
     bucket_filter = [b.strip().upper() for b in args.buckets.split(",") if b.strip()]
-    cv_buckets = buckets_mod.load_buckets(only=bucket_filter or None)
+    try:
+        cv_buckets = buckets_mod.load_buckets(only=bucket_filter or None)
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        # The bucket system (data/buckets.json + career/Resume/JOB-SEARCH/keywords/)
+        # is a personal, machine-local setup -- it points at CV keyword files that
+        # live outside this repo. A fresh checkout (or the web CV-upload flow,
+        # which scores a single ad-hoc CV rather than a fixed set of variants)
+        # has none of that, and previously this crashed the whole run. Degrade to
+        # "no bucket annotations" instead: scoring/matching against --cv still
+        # works, jobs just aren't tagged with a "send this CV variant" label.
+        log(f"bucket config unavailable, continuing without CV buckets ({exc})")
+        cv_buckets = []
 
     profile = load_profile(args.cv, args.rebuild_profile)
     jobs: list[dict] = []
@@ -774,20 +854,31 @@ def main() -> int:
         log(f"{len(jobs)} raw rows from jobhive")
     if "apis" in sources and not args.no_apis:
         jobs += fetch_free_apis(args.days, profile["role_titles"])
+    # Board searches are driven by the CV buckets' search terms. With no bucket
+    # config -- a fresh checkout, or the web CV-upload flow scoring one ad-hoc CV
+    # -- that list is empty, and karriere/stepstone were then searched for
+    # nothing and silently returned zero rows. The uploaded CV's own role titles
+    # are the right stand-in: they are what the profile says this person is.
+    search_terms = buckets_mod.all_search_terms(cv_buckets) or profile["role_titles"]
     if "karriere" in sources:
         # Locations are split without dropping empties: a trailing comma in
         # "wien," is the deliberate Austria-wide arm, not a typo.
         locations = [loc.strip() for loc in args.karriere_locations.split(",")]
         jobs += karriere_at.fetch(
-            buckets_mod.all_search_terms(cv_buckets), locations,
+            search_terms, locations,
             days=args.days, max_detail=args.karriere_max_detail)
     if "stepstone" in sources:
         # Same trailing-comma convention as --karriere-locations: the empty entry
         # is the deliberate Austria-wide arm, not a typo.
         locations = [loc.strip() for loc in args.stepstone_locations.split(",")]
         jobs += stepstone_at.fetch(
-            buckets_mod.all_search_terms(cv_buckets), locations,
+            search_terms, locations,
             days=args.days, max_pages=args.stepstone_pages)
+    if "adzuna" in sources:
+        jobs += job_apis.fetch_adzuna(search_terms, args.countries, args.days)
+    if "jooble" in sources:
+        locations = [loc.strip() for loc in args.jooble_locations.split(",")]
+        jobs += job_apis.fetch_jooble(search_terms, locations, args.days)
     if args.remote != "off":
         jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
         log(f"{len(jobs)} after remote-reachability filter")
@@ -813,7 +904,48 @@ def main() -> int:
     # Built from the full scored set, BEFORE the already-sent filter and the
     # --top cut: the dashboards are the backlog, the Telegram message is the
     # daily digest off the top of it.
-    generate_cv_dashboards(jobs, cv_buckets, args)
+    if not args.json_out:
+        generate_cv_dashboards(jobs, cv_buckets, args)
+
+    if args.json_out:
+        # Structured, one-shot output for programmatic callers (the dashboard's
+        # CV-upload-and-scan flow). Deliberately ignores the sent-jobs history --
+        # that mechanism exists so the Telegram digest never repeats itself, but
+        # "scan right now" should show every current match, seen before or not.
+        ranked = rank_jobs(list(jobs))
+        limit = max(args.top, 20) if args.top else len(ranked)
+        output_jobs = ranked[:limit]
+        api_key = os.environ.get("NVIDIA_API_KEY")
+        if api_key and not args.no_llm and output_jobs:
+            llm_rerank(output_jobs, profile, api_key)
+        result = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "cv": str(args.cv),
+            "profile_source": profile.get("source"),
+            "total_matches": len(jobs),
+            "jobs": [
+                {
+                    "title": j.get("title"),
+                    "company": j.get("company"),
+                    "location": j.get("location"),
+                    "posted": j.get("posted"),
+                    "salary": annual_salary_eur(j) or j.get("salary_summary"),
+                    "source": j.get("ats_type"),
+                    "apply_url": j.get("apply_url") or j.get("url"),
+                    "score": j.get("score"),
+                    "rank": j.get("rank"),
+                    "rank_score": j.get("rank_score"),
+                    "fit": j.get("fit"),
+                    "reason": j.get("reason"),
+                    "bucket": j.get("bucket"),
+                }
+                for j in output_jobs
+            ],
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(result, indent=2))
+        log(f"wrote {len(output_jobs)} matches to {args.json_out}")
+        return 0
 
     sent = {} if args.reset_sent else load_sent()
     if not args.no_dedup:

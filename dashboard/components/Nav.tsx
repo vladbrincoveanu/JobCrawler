@@ -38,6 +38,13 @@ export function Nav() {
               >
                 Runs
               </Link>
+              <Link
+                href="/scout"
+                className="text-gray-700 hover:text-gray-900"
+                data-testid="nav-link-scout"
+              >
+                Scout
+              </Link>
             </div>
           </div>
         </div>

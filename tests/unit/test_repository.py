@@ -1,5 +1,4 @@
 """Tests for crawler.storage.repository (PG CRUD)."""
-import psycopg
 
 from crawler.storage import repository as repo
 

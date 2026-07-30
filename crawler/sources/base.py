@@ -1,6 +1,8 @@
 """SourceAdapter Protocol — contract for all job sources."""
-from typing import AsyncIterator, Protocol, runtime_checkable
-from crawler.models import JobQuery, RawJob, NormalizedJob
+from collections.abc import AsyncIterator
+from typing import Protocol, runtime_checkable
+
+from crawler.models import JobQuery, NormalizedJob, RawJob
 
 
 @runtime_checkable

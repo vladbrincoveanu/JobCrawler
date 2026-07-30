@@ -3,10 +3,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from crawler.models import JobQuery, RawJob, NormalizedJob
-from crawler.pipeline import run, run_source, SourceResult
+from crawler.exceptions import CaptchaEncountered, SchemaChanged
+from crawler.models import JobQuery, NormalizedJob, RawJob
+from crawler.pipeline import run, run_source
 from crawler.storage import repository as repo
-from crawler.exceptions import SchemaChanged, CaptchaEncountered
 
 
 class StubAdapter:

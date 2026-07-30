@@ -1,15 +1,22 @@
 from datetime import datetime
+
 import pytest
 from bs4 import BeautifulSoup
-from crawler.sources.ams import (
-    _parse_search_card, _parse_detail_page, AMS_JOB_CARD_SELECTOR,
-    AMS_DETAIL_SELECTOR, AMS_TITLE_SELECTOR, AMS_COMPANY_SELECTOR,
-    AMS_LOCATION_SELECTOR, AMS_DESCRIPTION_SELECTOR, AMS_POSTED_SELECTOR,
-)
-from crawler.models import RawJob, NormalizedJob
-from crawler.storage.dedup import content_hash
-from crawler.exceptions import SchemaChanged
 
+from crawler.exceptions import SchemaChanged
+from crawler.models import NormalizedJob, RawJob
+from crawler.sources.ams import (
+    AMS_COMPANY_SELECTOR,
+    AMS_DESCRIPTION_SELECTOR,
+    AMS_DETAIL_SELECTOR,
+    AMS_JOB_CARD_SELECTOR,
+    AMS_LOCATION_SELECTOR,
+    AMS_POSTED_SELECTOR,
+    AMS_TITLE_SELECTOR,
+    _parse_detail_page,
+    _parse_search_card,
+)
+from crawler.storage.dedup import content_hash
 
 SEARCH_HTML = '''
 <html><body>

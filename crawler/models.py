@@ -1,6 +1,7 @@
 """Pydantic models — JobQuery, RawJob, NormalizedJob."""
 from datetime import datetime
-from pydantic import BaseModel, HttpUrl, Field, field_validator
+
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 class JobQuery(BaseModel):

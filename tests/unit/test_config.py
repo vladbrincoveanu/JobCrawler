@@ -1,5 +1,5 @@
-from pathlib import Path
 from crawler import config
+
 
 def test_database_url_default():
     assert "postgresql://" in config.DATABASE_URL

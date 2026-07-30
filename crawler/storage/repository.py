@@ -12,7 +12,6 @@ from psycopg.types.json import Jsonb
 
 from crawler.storage.dedup import content_hash
 
-
 # ---------- sources ----------
 
 def upsert_source(conn: psycopg.Connection, name: str, *, enabled: bool = True,

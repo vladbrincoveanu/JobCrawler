@@ -7,8 +7,17 @@ import { defineConfig, devices } from "@playwright/test";
  * runs migrations, seeds demo data. The webServer points the dashboard at
  * this DB via DATABASE_URL.
  *
- * Port 3011 used because port 3010 is occupied by knowledgeforge-ui.
+ * Port 3011 by default because port 3010 is occupied by knowledgeforge-ui.
+ * Override with DASHBOARD_PORT: the port was hard-coded in three places, so a
+ * second dashboard already listening on 3011 (another dev server, a parallel
+ * checkout) made the whole suite die with EADDRINUSE and no way to move it.
  */
+const PORT = Number(process.env.DASHBOARD_PORT ?? 3011);
+const BASE_URL = `http://127.0.0.1:${PORT}`;
+const TEST_DATABASE_URL =
+  process.env.DATABASE_URL ??
+  "postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test";
+
 export default defineConfig({
   testDir: "./tests",
   fullyParallel: true,
@@ -18,7 +27,7 @@ export default defineConfig({
   reporter: "list",
 
   use: {
-    baseURL: "http://127.0.0.1:3011",
+    baseURL: BASE_URL,
     trace: "on-first-retry",
     actionTimeout: 5000,
     navigationTimeout: 10000,
@@ -34,9 +43,23 @@ export default defineConfig({
   globalSetup: require("node:path").resolve(__dirname, "tests/global-setup.ts"),
 
   webServer: {
-    command: `DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test npx next start --port 3011`,
-    url: "http://127.0.0.1:3011",
-    timeout: 30_000,
+    // `next start` needs a build, and the suite previously assumed one already
+    // existed -- on a clean checkout it just timed out waiting for a server that
+    // could never boot. Building here also means a broken build fails the test
+    // run instead of silently reusing a stale .next.
+    command:
+      `npx next build && DATABASE_URL=${TEST_DATABASE_URL} ` +
+      `npx next start --port ${PORT}`,
+    // Readiness is probed on /scout, NOT on "/". The overview page queries
+    // PostgreSQL while rendering, and with no database running that request
+    // HANGS rather than erroring -- so Playwright never saw the server come up,
+    // timed out after four minutes, and the whole suite failed to start. That
+    // defeated global-setup's deliberate "skip the DB specs but still run the
+    // scout specs" handling, because nothing ran at all. /scout is statically
+    // rendered and touches no database, which is exactly the question
+    // "is the server listening?" should be asking.
+    url: `${BASE_URL}/scout`,
+    timeout: 240_000,
     reuseExistingServer: !process.env.CI,
     stdout: "pipe",
     stderr: "pipe",

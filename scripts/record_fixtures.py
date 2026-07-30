@@ -12,10 +12,15 @@ from pathlib import Path
 from crawler import config
 from crawler.browser import PlaywrightBrowserContext, SessionCookieStore
 from crawler.sources.ams import (
-    AMS_JOB_CARD_SELECTOR, AMS_DETAIL_SELECTOR,
+    AMS_DETAIL_SELECTOR,
+    AMS_JOB_CARD_SELECTOR,
 )
 
 FIXTURES_DIR = Path(__file__).parent.parent / "tests" / "fixtures"
+# The PostgreSQL migration removed config.DB_PATH, which this used to derive the
+# session file from; every run since then died with AttributeError before it
+# opened a browser. The cookie jar was always data/session_ams.json in practice.
+SESSION_FILE = Path(__file__).parent.parent / "data" / "session_ams.json"
 
 
 def strip_descriptions(html: str) -> str:
@@ -31,7 +36,7 @@ def strip_descriptions(html: str) -> str:
 
 async def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-    cookie_store = SessionCookieStore(config.DB_PATH.parent / "session_ams.json")
+    cookie_store = SessionCookieStore(SESSION_FILE)
 
     async with PlaywrightBrowserContext(cookie_store) as browser:
         # Search page

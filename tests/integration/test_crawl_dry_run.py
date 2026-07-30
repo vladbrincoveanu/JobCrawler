@@ -2,10 +2,10 @@
 import pytest
 
 from crawler import config
+from crawler.models import JobQuery
+from crawler.pipeline import run
 from crawler.sources.ams import AmsAdapter
 from crawler.storage import repository as repo
-from crawler.pipeline import run
-from crawler.models import JobQuery
 from tests.fakes.browser import FakeBrowserContext
 
 

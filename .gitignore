@@ -84,7 +84,12 @@ pnpm-debug.log*
 .pgdata/
 postgres-data/
 data/profile.json
+data/profiles/
 data/sent_jobs.json
+data/uploads/
 data/dashboard.html
 data/dashboards/
 logs/
+
+# Test build output (NEXT_DIST_DIR)
+.next-test/

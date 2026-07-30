@@ -1,6 +1,7 @@
 import pytest
+
+from crawler.exceptions import CaptchaEncountered, SPAWaitTimeout
 from tests.fakes.browser import FakeBrowserContext
-from crawler.exceptions import CaptchaEncountered, Blocked, SPAWaitTimeout
 
 
 @pytest.fixture

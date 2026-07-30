@@ -1,4 +1,4 @@
-from crawler.storage.dedup import normalize, content_hash
+from crawler.storage.dedup import content_hash, normalize
 
 
 def test_normalize_lowercase():

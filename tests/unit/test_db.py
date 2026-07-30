@@ -1,9 +1,8 @@
 """Tests for crawler.storage.db (PG connection factory + pool)."""
 import psycopg
 import psycopg_pool
-from psycopg.rows import dict_row
 
-from crawler.storage.db import connect, get_pool, close_pool
+from crawler.storage.db import close_pool, connect, get_pool
 
 
 def test_connect_returns_psycopg_connection(pg_url):

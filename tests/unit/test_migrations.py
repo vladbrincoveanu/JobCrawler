@@ -50,19 +50,24 @@ def test_migrate_is_idempotent(pg_migrated_template):
     assert new == []  # nothing new to apply
 
 
-def test_migrate_returns_new_versions_on_first_run():
-    """Calling migrate() against a fresh template returns the applied version."""
+def test_migrate_returns_new_versions_on_first_run(pg_base_url):
+    """Calling migrate() against a fresh template returns the applied version.
+
+    Takes `pg_base_url` rather than hardcoding the connection string: that
+    fixture is what skips when PostgreSQL is unreachable, so without it this was
+    the one test in the suite that *failed* instead of skipping on a machine with
+    no database running -- and it ignored DATABASE_URL besides.
+    """
     import uuid
+
     import psycopg
-    schema = f"test_{uuid.uuid4().hex[:12]}"
-    base = "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
-    admin = base.rsplit("/", 1)[0] + "/postgres"
+    admin = pg_base_url.rsplit("/", 1)[0] + "/postgres"
     template = f"jobcrawler_tmpl_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(admin, autocommit=True) as c:
         with c.cursor() as cur:
             cur.execute(f'CREATE DATABASE "{template}"')
     try:
-        tmpl_url = base.rsplit("/", 1)[0] + f"/{template}"
+        tmpl_url = pg_base_url.rsplit("/", 1)[0] + f"/{template}"
         with psycopg.connect(tmpl_url) as conn:
             applied = runner.migrate(conn, Path("crawler/storage/migrations"))
             conn.commit()

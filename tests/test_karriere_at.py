@@ -89,6 +89,66 @@ def test_salary_parsing(text, expected):
     assert k.parse_salary(text)[0] == expected
 
 
+# --- full-ad-body parsing (regression: the €1.2M "salary") ---
+
+def _body(*paragraphs: str) -> str:
+    """Pad to ad-body length so parse_salary uses windows, not whole-text."""
+    filler = ("Wir bieten ein spannendes Umfeld und ein motiviertes Team. " * 12)
+    return filler + " ".join(paragraphs) + " " + filler
+
+
+def test_annual_figure_is_not_multiplied_by_a_distant_period_word():
+    """The real failure: an ad stated 'Jahresbruttogehalt ab EUR 85.900,22' and
+    used the word 'monatlich' in an unrelated sentence ~130 chars later. The old
+    parser matched the period word anywhere in a 4000-char slab and reported
+    €1,202,600/yr. karriere.at job 7834865, live on 2026-07-30."""
+    text = _body(
+        "Je nach Ausbildungsgrad und facheinschlägiger Berufserfahrung gilt laut "
+        "Kollektivvertrag ein Jahresbruttogehalt ab EUR 85.900,22 bei vollständiger "
+        "Erfüllung des Anforderungsprofils.",
+        "Die Abrechnung erfolgt monatlich im Nachhinein.",
+    )
+    assert k.parse_salary(text)[0] == 85_900
+
+
+def test_euro_amount_outside_a_salary_context_is_ignored():
+    """A funding/revenue figure is not pay. Without the context window the old
+    parser took the largest euro amount in the ad, whatever it described."""
+    text = _body(
+        "Unser Unternehmen verwaltet ein Projektvolumen von EUR 250.000.000.",
+        "Zusätzlich vergeben wir Förderungen von EUR 90.000 pro Projekt.",
+    )
+    assert k.parse_salary(text)[0] is None
+
+
+def test_salary_context_wins_over_a_larger_unrelated_amount():
+    text = _body(
+        "Wir investieren jährlich EUR 300.000.000 in Forschung.",
+        "Für diese Position bieten wir ein Bruttojahresgehalt von EUR 70.000.",
+    )
+    assert k.parse_salary(text)[0] == 70_000
+
+
+def test_monthly_figure_in_an_ad_body_is_still_annualised():
+    text = _body("Das Bruttogehalt beträgt 4.500 € monatlich auf Basis Vollzeit.")
+    assert k.parse_salary(text)[0] == 4_500 * 14
+
+
+def test_implausible_annual_amount_is_refused():
+    """€1.2M is not a salary; returning nothing beats returning a wrong number."""
+    text = _body("Das Gehalt für diese Rolle liegt bei EUR 1.202.600 brutto.")
+    assert k.parse_salary(text)[0] is None
+
+
+def test_snippet_points_at_the_sentence_the_figure_came_from():
+    """The snippet used to be text[:120] -- the ad's opening words, which said
+    nothing about where the number came from."""
+    text = _body("Für diese Position bieten wir ein Bruttojahresgehalt von EUR 70.000.")
+    value, snippet = k.parse_salary(text)
+    assert value == 70_000
+    assert "70.000" in snippet
+
+
 def test_search_urls_cross_terms_and_locations():
     urls = k.search_urls(["devops engineer", ".net"], ["wien", ""])
     assert urls == [

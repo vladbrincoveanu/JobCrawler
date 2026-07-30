@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { databaseUnavailable } from "./db-availability";
 
 /**
  * Tests run against a fresh test DB seeded by global-setup.ts:
@@ -7,7 +8,16 @@ import { test, expect, type Page } from "@playwright/test";
  *   - 1 error: captcha on the partial run
  *
  * No console errors should appear on any page.
+ *
+ * Every assertion here reads seeded rows, so without PostgreSQL there is nothing
+ * to assert against. global-setup.ts records an unreachable database in
+ * tests/db-availability.ts; skipping on it keeps "the DB is down" legible instead of
+ * reporting it as a dozen unrelated UI failures.
  */
+test.skip(
+  databaseUnavailable(),
+  "PostgreSQL unavailable — run: docker compose up -d postgres",
+);
 
 async function expectNoConsoleErrors(page: Page) {
   const errors: string[] = [];

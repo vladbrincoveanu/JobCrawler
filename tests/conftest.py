@@ -15,7 +15,6 @@ from psycopg_pool import ConnectionPool
 
 from crawler.storage.migrations.runner import migrate
 
-
 PG_BASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
 )

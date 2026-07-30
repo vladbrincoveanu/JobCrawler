@@ -1,7 +1,8 @@
 import inspect
 from typing import get_type_hints
+
+from crawler.models import JobQuery
 from crawler.sources.base import SourceAdapter
-from crawler.models import JobQuery, RawJob, NormalizedJob
 
 
 def test_source_adapter_is_protocol():

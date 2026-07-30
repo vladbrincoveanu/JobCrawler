@@ -1,14 +1,18 @@
 """Per-source crawl orchestrator with circuit breaker. Spec § Data Flow."""
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
 
 import psycopg
 
 from crawler import config
 from crawler.exceptions import (
-    CrawlerError, FetchError, Blocked, CaptchaEncountered,
-    CookieExpired, SchemaChanged,
+    Blocked,
+    CaptchaEncountered,
+    CookieExpired,
+    CrawlerError,
+    FetchError,
+    SchemaChanged,
 )
 from crawler.models import JobQuery
 from crawler.sources.base import SourceAdapter
@@ -46,9 +50,7 @@ class _CircuitBreaker:
         self._opened = False
 
     def record(self, exc: Exception) -> None:
-        if isinstance(exc, Blocked):
-            self._opened = True
-        elif isinstance(exc, (CaptchaEncountered, CookieExpired, SchemaChanged)):
+        if isinstance(exc, Blocked) or isinstance(exc, (CaptchaEncountered, CookieExpired, SchemaChanged)):
             self._opened = True
         elif isinstance(exc, FetchError):
             self._consecutive_fetch_errors += 1
@@ -107,7 +109,7 @@ async def run_source(conn: psycopg.Connection, adapter: SourceAdapter,
         if result.status == "":
             result.status = "success" if result.counters["errors"] == 0 else "partial"
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result.status = "failed"
         result.error = f"source timeout after {config.SOURCE_TIMEOUT_SECONDS}s"
         return result

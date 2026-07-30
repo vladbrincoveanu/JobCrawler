@@ -37,7 +37,14 @@ from urllib.parse import quote
 
 import requests
 
-from .at_common import clean, in_scope, parse_salary  # noqa: F401 - in_scope re-exported
+from .at_common import (
+    STEPSTONE_PACE_SECONDS,
+    STEPSTONE_WORKERS,
+    clean,
+    fetch_parallel,
+    in_scope,
+    parse_salary,
+)
 
 BASE = "https://www.stepstone.at"
 UA = {
@@ -47,7 +54,8 @@ UA = {
     ),
     "Accept-Language": "de-AT,de;q=0.9,en;q=0.8",
 }
-REQUEST_DELAY = 1.0  # be a polite guest: ~1 req/s
+# Concurrency, not a sleep, is how this source stays polite now -- see
+# at_common.fetch_parallel for why and for the SCOUT_FETCH_WORKERS override.
 CARDS_PER_PAGE = 25
 
 # One result card is an <article> carrying the numeric ad id. Splitting on that
@@ -163,15 +171,32 @@ def parse_cards(html: str, today: date | None = None) -> list[dict]:
     return cards
 
 
-def _get(url: str) -> str | None:
-    """Single GET; a failure is logged and skipped, never fatal to the run."""
-    try:
-        resp = requests.get(url, headers=UA, timeout=25)
-        resp.raise_for_status()
-        return resp.text
-    except Exception as exc:  # noqa: BLE001 - one bad query must not kill the scout
-        log(f"request failed, skipping ({exc}): {url}")
-        return None
+WAF_STATUSES = (403, 429, 503)
+
+
+def _get(url: str, attempts: int = 3) -> str | None:
+    """Single GET; a failure is logged and skipped, never fatal to the run.
+
+    403/429/503 here are the Akamai WAF throttling rather than a real "this page
+    does not exist", so those are retried with a widening backoff. Without the
+    retry a brief throttle silently costs a whole search term's results, which
+    reads downstream as "StepStone has no such jobs" rather than "we were told
+    to slow down".
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=UA, timeout=25)
+            if resp.status_code in WAF_STATUSES and attempt < attempts:
+                time.sleep(2.0 * attempt)
+                continue
+            resp.raise_for_status()
+            return resp.text
+        except requests.RequestException as exc:
+            if attempt >= attempts:
+                log(f"request failed, skipping ({exc}): {url}")
+                return None
+            time.sleep(2.0 * attempt)
+    return None
 
 
 def search_url(term: str, location: str, page: int = 1) -> str:
@@ -184,7 +209,7 @@ def search_url(term: str, location: str, page: int = 1) -> str:
 
 
 def fetch(terms: list[str], locations: list[str], days: int = 14,
-          max_pages: int = 3, delay: float = REQUEST_DELAY) -> list[dict]:
+          max_pages: int = 3) -> list[dict]:
     """Search StepStone.at and return rows in the scout's job-dict shape.
 
     Rows with an unparseable posting date are KEPT, matching karriere_at: the
@@ -197,25 +222,40 @@ def fetch(terms: list[str], locations: list[str], days: int = 14,
     log(f"{len(pairs)} searches x up to {max_pages} pages "
         f"({len(terms)} terms x {len(locations)} locations)")
 
-    seen: dict[str, dict] = {}
-    requests_made = 0
-    for term, location in pairs:
+    def crawl_pair(pair: tuple[str, str]) -> tuple[list[dict], int]:
+        """All pages for one (term, location), paged in order.
+
+        Paging stays sequential inside a pair because each page's result decides
+        whether there is a next one -- fetching page 3 of a search that ended at
+        page 1 would be wasted requests against the board. Parallelism is across
+        pairs, where no such dependency exists.
+        """
+        term, location = pair
+        cards_out: list[dict] = []
+        fetched = 0
         for page in range(1, max_pages + 1):
-            if requests_made:
-                time.sleep(delay)
-            requests_made += 1
+            fetched += 1
             html = _get(search_url(term, location, page))
             if not html:
                 break
             cards = parse_cards(html, today)
             if not cards:
                 break  # past the last page of results for this search
-            for card in cards:
-                if card["posted"] and card["posted"] < cutoff:
-                    continue
-                seen.setdefault(card["url"], card)
+            cards_out.extend(cards)
             if len(cards) < CARDS_PER_PAGE:
                 break  # short page: this was the last one
+        return cards_out, fetched
+
+    seen: dict[str, dict] = {}
+    requests_made = 0
+    for cards, fetched in fetch_parallel(pairs, crawl_pair,
+                                         workers=STEPSTONE_WORKERS,
+                                         pace=STEPSTONE_PACE_SECONDS):
+        requests_made += fetched
+        for card in cards:
+            if card["posted"] and card["posted"] < cutoff:
+                continue
+            seen.setdefault(card["url"], card)
 
     log(f"{len(seen)} unique ads from {requests_made} search pages")
 
@@ -223,7 +263,7 @@ def fetch(terms: list[str], locations: list[str], days: int = 14,
     dropped = 0
     for card in seen.values():
         remote = bool(re.search(r"home[\s-]?office|remote|telearbeit",
-                                card["home_office"] or "", re.I))
+                                card["home_office"] or "", re.IGNORECASE))
         if not in_scope({"location": card["location"],
                          "is_remote": str(remote).lower()}, locations):
             dropped += 1

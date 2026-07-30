@@ -22,15 +22,25 @@ from __future__ import annotations
 
 import re
 import sys
-import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from urllib.parse import quote
 
 import requests
 
 from .at_common import (  # noqa: F401 - re-exported as this module's public API
-    AMOUNT_RE, AT_MONTHS_PER_YEAR, ENTITIES, LOCATION_ALIASES, MONTHLY_RE,
-    TAG_RE, WS_RE, YEARLY_RE, clean, german_number, in_scope, parse_salary,
+    AMOUNT_RE,
+    AT_MONTHS_PER_YEAR,
+    ENTITIES,
+    LOCATION_ALIASES,
+    MONTHLY_RE,
+    TAG_RE,
+    WS_RE,
+    YEARLY_RE,
+    clean,
+    fetch_parallel,
+    german_number,
+    in_scope,
+    parse_salary,
 )
 
 BASE = "https://www.karriere.at"
@@ -41,7 +51,8 @@ UA = {
     ),
     "Accept-Language": "de-AT,de;q=0.9,en;q=0.8",
 }
-REQUEST_DELAY = 1.0  # be a polite guest: ~1 req/s
+# Concurrency, not a sleep, is how this source stays polite now -- see
+# at_common.fetch_parallel for why and for the SCOUT_FETCH_WORKERS override.
 
 # One result card. The list markup is BEM (`m-jobsListItem__*`) and minified onto
 # few lines, so cards are split on the title link rather than on newlines.
@@ -163,8 +174,7 @@ def fetch_detail(url: str) -> tuple[str, int | None, str | None]:
 
 
 def fetch(terms: list[str], locations: list[str], days: int = 14,
-          detail: bool = True, max_detail: int = 60,
-          delay: float = REQUEST_DELAY) -> list[dict]:
+          detail: bool = True, max_detail: int = 60) -> list[dict]:
     """Search karriere.at and return rows in the scout's job-dict shape.
 
     Rows with an unparseable posting date are KEPT: karriere.at omits the date
@@ -177,10 +187,7 @@ def fetch(terms: list[str], locations: list[str], days: int = 14,
     log(f"{len(urls)} searches ({len(terms)} terms x {len(locations)} locations)")
 
     seen: dict[str, dict] = {}
-    for i, url in enumerate(urls):
-        if i:
-            time.sleep(delay)
-        html = _get(url)
+    for html in fetch_parallel(urls, _get):
         if not html:
             continue
         for card in parse_cards(html, today):
@@ -195,7 +202,7 @@ def fetch(terms: list[str], locations: list[str], days: int = 14,
     candidates = []
     for card in seen.values():
         pill_text = " ".join(card["pills"])
-        remote = bool(re.search(r"home\s?office|remote|teleworking", pill_text, re.I))
+        remote = bool(re.search(r"home\s?office|remote|teleworking", pill_text, re.IGNORECASE))
         card["pill_text"] = pill_text
         card["remote"] = remote
         if in_scope({"location": card["location"], "is_remote": str(remote).lower()},
@@ -206,14 +213,19 @@ def fetch(terms: list[str], locations: list[str], days: int = 14,
         log(f"{dropped} ads dropped as out of scope (onsite outside "
             f"{', '.join(l for l in locations if l.strip()) or 'anywhere'})")
 
+    # Detail pages are fetched concurrently for the first `max_detail`
+    # candidates; the rest keep the empty placeholder and fall back to pill text.
+    detailed = candidates[:max_detail] if detail else []
+    details = dict(zip(
+        (card["url"] for card in detailed),
+        fetch_parallel([card["url"] for card in detailed], fetch_detail),
+    ))
+
     jobs = []
-    for i, card in enumerate(candidates):
-        description, salary_eur, salary_raw = "", None, None
+    for card in candidates:
         pill_text = card["pill_text"]
         remote = card["remote"]
-        if detail and i < max_detail:
-            time.sleep(delay)
-            description, salary_eur, salary_raw = fetch_detail(card["url"])
+        description, salary_eur, salary_raw = details.get(card["url"], ("", None, None))
         if salary_eur is None:
             salary_eur, salary_raw = parse_salary(pill_text)
         jobs.append({
