@@ -5,8 +5,8 @@ top matches as a Telegram message.
 
 Default run (dry):    python scripts/scout.py --dry-run
 Send to dev bot:      python scripts/scout.py
-Defaults: AT (Vienna boosted) + remote EU/global, min €85k (unknown salaries kept),
-top 5, never resends a job already delivered. Dashboard: data/dashboard.html
+Defaults: AT (Vienna boosted) + remote EU/global, no salary floor, top 5, never
+resends a job already delivered. Dashboard: data/dashboard.html
 (regenerated on every send — open it directly in a browser, no server needed).
 Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
 
@@ -24,9 +24,10 @@ files kwcount.py audits the CVs against). See data/buckets.json.
   Only bucket C, karriere.at only:
       python scripts/scout.py --dry-run --sources karriere --buckets C
 
-Note: Austrian ads commonly quote €45–70k gross. The default --min-salary 85000
-therefore drops most karriere.at rows that state a salary (ads with no salary are
-still kept). Lower it to see the Austrian mid-market.
+Note: there is no salary floor by default. Austrian ads commonly quote €45–70k
+gross, so any floor near €85k silently drops most AT rows that state a salary
+while letting through every row that states none. Opt in with --min-salary if
+you want one.
 
 Telegram credentials: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars, or fallback
 to immo-scouter's config.json (--telegram dev|main selects the bot there).
@@ -583,10 +584,10 @@ def parse_args() -> argparse.Namespace:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--countries", default="AT",
                         help="comma-separated ISO codes: AT,DE,CH (default AT)")
-    parser.add_argument("--min-salary", type=int, default=85000,
-                        help="min annual EUR (default 85000); jobs with a LOWER parsed salary "
-                             "are dropped (jobs without salary info are kept unless "
-                             "--require-salary; 0 disables)")
+    parser.add_argument("--min-salary", type=int, default=0,
+                        help="min annual EUR (default 0 = no floor); jobs with a LOWER "
+                             "parsed salary are dropped (jobs without salary info are "
+                             "kept unless --require-salary)")
     parser.add_argument("--require-salary", action="store_true",
                         help="drop jobs with no parseable salary")
     parser.add_argument("--days", type=int, default=14, help="recency window (default 14)")
