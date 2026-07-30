@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CV-matched job scout: pull jobs from the jobhive ATS dataset, free remote-job
-APIs and karriere.at, score them against a CV profile, and send the top matches
-as a Telegram message.
+APIs, karriere.at and StepStone.at, score them against a CV profile, and send the
+top matches as a Telegram message.
 
 Default run (dry):    python scripts/scout.py --dry-run
 Send to dev bot:      python scripts/scout.py
@@ -10,10 +10,13 @@ top 5, never resends a job already delivered. Dashboard: data/dashboard.html
 (regenerated on every send — open it directly in a browser, no server needed).
 Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
 
-Sources (--sources, default all three):
-  jobhive   international ATS parquet slices (needs duckdb)
-  apis      arbeitnow / remotive / jobicy
-  karriere  karriere.at, Austria's largest board — Wien + Austria-wide remote
+Sources (--sources, default all four):
+  jobhive    international ATS parquet slices (needs duckdb)
+  apis       arbeitnow / remotive / jobicy
+  karriere   karriere.at, Austria's largest board — Wien + Austria-wide remote
+  stepstone  StepStone.at — same coverage area, listing-only (detail pages are
+             WAF-blocked, so these rows carry a teaser instead of a full ad text
+             and almost never a salary)
 
 CV buckets: every job is tagged with WHICH of the four CV variants to send,
 scored against the keyword files in career/Resume/JOB-SEARCH/keywords/ (the same
@@ -45,7 +48,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import buckets as buckets_mod  # noqa: E402
-from sources import karriere_at  # noqa: E402
+from sources import karriere_at, stepstone_at  # noqa: E402
 
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
 NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
@@ -602,8 +605,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
     parser.add_argument("--no-apis", action="store_true",
                         help="skip live free APIs (arbeitnow, remotive, jobicy)")
-    parser.add_argument("--sources", default="jobhive,apis,karriere",
-                        help="comma-separated: jobhive, apis, karriere (default all)")
+    parser.add_argument("--sources", default="jobhive,apis,karriere,stepstone",
+                        help="comma-separated: jobhive, apis, karriere, stepstone "
+                             "(default all)")
     parser.add_argument("--buckets", default="",
                         help="restrict CV variants, e.g. A,C (default: all in "
                              "data/buckets.json)")
@@ -614,6 +618,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--karriere-max-detail", type=int, default=60,
                         help="max karriere.at detail pages to fetch for "
                              "descriptions/salary (default 60)")
+    parser.add_argument("--stepstone-locations", default="wien,",
+                        help="StepStone.at location slugs; an empty entry means "
+                             "Austria-wide, which is how remote ads are reached "
+                             "(default 'wien,' = Wien + Austria-wide)")
+    parser.add_argument("--stepstone-pages", type=int, default=3,
+                        help="max StepStone.at result pages per search term "
+                             "(25 ads a page; default 3)")
     parser.add_argument("--no-dedup", action="store_true",
                         help="don't skip jobs already sent in a previous run")
     parser.add_argument("--reset-sent", action="store_true",
@@ -654,6 +665,13 @@ def main() -> int:
         jobs += karriere_at.fetch(
             buckets_mod.all_search_terms(cv_buckets), locations,
             days=args.days, max_detail=args.karriere_max_detail)
+    if "stepstone" in sources:
+        # Same trailing-comma convention as --karriere-locations: the empty entry
+        # is the deliberate Austria-wide arm, not a typo.
+        locations = [loc.strip() for loc in args.stepstone_locations.split(",")]
+        jobs += stepstone_at.fetch(
+            buckets_mod.all_search_terms(cv_buckets), locations,
+            days=args.days, max_pages=args.stepstone_pages)
     if args.remote != "off":
         jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
         log(f"{len(jobs)} after remote-reachability filter")

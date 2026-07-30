@@ -28,6 +28,11 @@ from urllib.parse import quote
 
 import requests
 
+from .at_common import (  # noqa: F401 - re-exported as this module's public API
+    AMOUNT_RE, AT_MONTHS_PER_YEAR, ENTITIES, LOCATION_ALIASES, MONTHLY_RE,
+    TAG_RE, WS_RE, YEARLY_RE, clean, german_number, in_scope, parse_salary,
+)
+
 BASE = "https://www.karriere.at"
 UA = {
     "User-Agent": (
@@ -50,50 +55,15 @@ LOCATION_RE = re.compile(r'class="m-jobsListItem__location"[^>]*>([^<]*)')
 DATE_RE = re.compile(r'm-jobsListItem__date[^>]*>(.*?)<', re.DOTALL)
 PILL_RE = re.compile(r'class="m-jobsListItem__pill">(.*?)<', re.DOTALL)
 
-TAG_RE = re.compile(r"<[^>]+>")
-WS_RE = re.compile(r"\s+")
-
 DETAIL_DESC_RE = re.compile(
     r'<div[^>]*class="[^"]*m-jobContent__jobDetail[^"]*"[^>]*>(.*?)</div>\s*</div>', re.DOTALL)
-
-# karriere.at writes the amount BEFORE the currency ("3.954 € – 5.000 € monatlich",
-# "ab 56.000 € jährlich", "ab 49.784,42 € jährlich"); job text sometimes uses the
-# other order ("mind. EUR 65.000 brutto/Jahr"). Both are matched.
-AMOUNT_RE = re.compile(r"(?:(?:EUR|€)\s*([\d][\d.,]*)|([\d][\d.,]*)\s*(?:EUR|€))",
-                       re.IGNORECASE)
-MONTHLY_RE = re.compile(r"monatlich|pro\s+Monat|/\s*Monat|per\s+month|/\s*month|p\.?m\.?\b",
-                        re.IGNORECASE)
-YEARLY_RE = re.compile(r"j(?:ä|ae)hrlich|pro\s+Jahr|/\s*Jahr|per\s+year|/\s*year|p\.?a\.?\b",
-                       re.IGNORECASE)
-
-# Austrian gross salaries are quoted per month and paid 14x a year (13th/14th
-# month are statutory). Annualising a monthly figure at 12x understates real
-# gross by ~17%, which silently drops good ads under --min-salary.
-AT_MONTHS_PER_YEAR = 14
 
 # "vor 3 Tagen", "gestern", "heute", or a literal date.
 REL_DAYS_RE = re.compile(r"vor\s+(\d+)\s+Tag", re.IGNORECASE)
 ABS_DATE_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{4})")
 
-ENTITIES = {
-    "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'",
-    "&apos;": "'", "&nbsp;": " ", "&auml;": "ä", "&ouml;": "ö", "&uuml;": "ü",
-    "&Auml;": "Ä", "&Ouml;": "Ö", "&Uuml;": "Ü", "&szlig;": "ß", "&euro;": "€",
-    "&ndash;": "–", "&mdash;": "—",
-}
-
-
 def log(msg: str) -> None:
     print(f"[karriere.at] {msg}", file=sys.stderr)
-
-
-def clean(raw: str) -> str:
-    """Strip tags, decode the entities karriere.at actually emits, squash space."""
-    text = TAG_RE.sub(" ", raw or "")
-    for entity, char in ENTITIES.items():
-        text = text.replace(entity, char)
-    text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
-    return WS_RE.sub(" ", text).strip()
 
 
 def slugify(term: str) -> str:
@@ -122,43 +92,6 @@ def parse_posted(raw: str, today: date) -> str | None:
         except ValueError:
             return None
     return None
-
-
-def _german_number(raw: str) -> int | None:
-    """German formatting: '.' groups thousands, ',' is the decimal separator.
-    '49.784,42' -> 49784. Cents are irrelevant here, so the decimal part is cut."""
-    try:
-        return int(raw.replace(".", "").split(",")[0])
-    except ValueError:
-        return None
-
-
-def parse_salary(text: str) -> tuple[int | None, str | None]:
-    """Best-effort annual gross EUR from an Austrian salary line.
-
-    Returns (annual_eur, raw_snippet). For a range ("3.954 € – 5.000 €") the TOP
-    of the range is used, matching how the scout treats salary_max elsewhere.
-    """
-    text = clean(text or "")
-    if not text:
-        return None, None
-    amounts = [v for v in (_german_number(m.group(1) or m.group(2))
-                           for m in AMOUNT_RE.finditer(text)) if v]
-    amounts = [v for v in amounts if v > 0]
-    if not amounts:
-        return None, None
-    value = max(amounts)
-
-    if MONTHLY_RE.search(text):
-        value *= AT_MONTHS_PER_YEAR
-    elif YEARLY_RE.search(text):
-        pass
-    elif value < 15000:
-        # No period stated. A figure this small can only be a monthly gross.
-        value *= AT_MONTHS_PER_YEAR
-    if value < 10000:
-        return None, None  # implausible as an annual salary; don't guess
-    return value, text[:120]
 
 
 def parse_cards(html: str, today: date | None = None) -> list[dict]:
@@ -216,30 +149,6 @@ def search_urls(terms: list[str], locations: list[str]) -> list[str]:
             urls.append(f"{BASE}/jobs/{slug}/{loc_slug}" if loc_slug
                         else f"{BASE}/jobs/{slug}")
     return list(dict.fromkeys(urls))
-
-
-LOCATION_ALIASES = {"wien": ("wien", "vienna"), "vienna": ("wien", "vienna")}
-
-
-def in_scope(job: dict, named_locations: list[str]) -> bool:
-    """Keep a job only if it is in one of the named locations, or is remote.
-
-    The Austria-wide search arm (the empty location) exists to reach remote and
-    homeoffice ads that a city-filtered search hides. Without this check it also
-    drags in every onsite ad in Linz, Graz and Salzburg -- the arm's side effect,
-    not its purpose. With no named locations, everything is in scope.
-    """
-    wanted = [loc.strip().lower() for loc in named_locations if loc.strip()]
-    if not wanted:
-        return True
-    if (job.get("is_remote") or "").lower() == "true":
-        return True
-    haystack = (job.get("location") or "").lower()
-    for loc in wanted:
-        for alias in LOCATION_ALIASES.get(loc, (loc,)):
-            if alias in haystack:
-                return True
-    return False
 
 
 def fetch_detail(url: str) -> tuple[str, int | None, str | None]:
