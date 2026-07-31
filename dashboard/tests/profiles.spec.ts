@@ -49,6 +49,15 @@ test.describe("CV settings", () => {
     await expect(page.getByTestId("no-auth-configured")).toBeVisible();
   });
 
+  test("offers no way to create a CV while signed out", async ({ page }) => {
+    // Creating a CV is a commit to a public repository plus a scheduled scan
+    // that spends Actions minutes. The form exists now, so the absence of this
+    // assertion is what would let a refactor render it for anonymous visitors --
+    // the server would still refuse, but the page would be inviting the attempt.
+    await expect(page.getByTestId("cv-new-open")).toHaveCount(0);
+    await expect(page.getByTestId("cv-new-form")).toHaveCount(0);
+  });
+
   test("is reachable from the nav", async ({ page }) => {
     await page.goto("/matches");
     await page.getByTestId("nav-link-cvs").click();

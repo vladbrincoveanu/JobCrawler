@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import type { CvProfile } from "@/lib/cvProfiles";
+import { NewCvForm } from "@/components/NewCvForm";
 import { ScanNowButton } from "@/components/ScanNowButton";
 
 /**
@@ -88,19 +89,6 @@ export function CvManager({ cvs, writable, backend, origin, signedIn }: Props) {
     }
   }
 
-  if (draft.length === 0) {
-    return (
-      <p
-        data-testid="cvs-empty"
-        className="rounded-lg border border-dashed border-gray-300 p-6 text-sm text-gray-600"
-      >
-        No CV profiles are configured. They live in{" "}
-        <code className="rounded bg-gray-100 px-1">scout/profiles.json</code>
-        {backend === "github" ? " on GitHub" : " in this checkout"}: {origin}
-      </p>
-    );
-  }
-
   return (
     <div className="space-y-4" data-testid="cv-manager">
       {!signedIn && (
@@ -115,6 +103,18 @@ export function CvManager({ cvs, writable, backend, origin, signedIn }: Props) {
         <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
           The GitHub write path is not configured on this deployment, so saves will
           fail. Set GITHUB_REPO and GITHUB_TOKEN.
+        </p>
+      )}
+
+      {draft.length === 0 && (
+        <p
+          data-testid="cvs-empty"
+          className="rounded-lg border border-dashed border-gray-300 p-6 text-sm text-gray-600"
+        >
+          No CV profiles are configured. They live in{" "}
+          <code className="rounded bg-gray-100 px-1">scout/profiles.json</code>
+          {backend === "github" ? " on GitHub" : " in this checkout"}: {origin}
+          {signedIn ? " — or add one below." : ""}
         </p>
       )}
 
@@ -298,6 +298,16 @@ export function CvManager({ cvs, writable, backend, origin, signedIn }: Props) {
           </section>
         );
       })}
+
+      {/* After the list, so it reads as "and another" rather than pushing the
+          CVs you came to edit below the fold. */}
+      {signedIn && (
+        <NewCvForm
+          existingIds={draft.map((p) => p.id)}
+          disabled={!writable}
+          onCreated={(p) => setDraft((prev) => [...prev, p])}
+        />
+      )}
     </div>
   );
 }

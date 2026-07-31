@@ -1,9 +1,12 @@
 import { listRuns, listErrorsForRun } from "@/lib/queries";
+import { DatabaseRequired } from "@/components/DatabaseRequired";
 import { RunTable } from "@/components/RunTable";
 
 export const dynamic = "force-dynamic";
 
 export default async function RunsPage() {
+  if (!process.env.DATABASE_URL) return <DatabaseRequired page="Runs" />;
+
   const runs = await listRuns(100);
 
   const errorsByRun: Record<number, Awaited<ReturnType<typeof listErrorsForRun>>> = {};

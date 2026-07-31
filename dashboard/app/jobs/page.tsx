@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { listJobs, listSources } from "@/lib/queries";
+import { DatabaseRequired } from "@/components/DatabaseRequired";
 import { JobTable } from "@/components/JobTable";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,10 @@ interface JobsPageProps {
 const PAGE_SIZE = 50;
 
 export default async function JobsPage({ searchParams }: JobsPageProps) {
+  // Checked before the first query: listJobs would hang on an unreachable host
+  // rather than throw, so there is no catch that could do this instead.
+  if (!process.env.DATABASE_URL) return <DatabaseRequired page="Jobs" />;
+
   const params = await searchParams;
   const source = params.source?.trim() || undefined;
   const search = params.search?.trim() || undefined;

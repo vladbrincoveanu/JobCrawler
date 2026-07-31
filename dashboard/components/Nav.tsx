@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { localScanAvailable } from "@/lib/localScan";
+
 /**
  * Server component: it decides what to show from the deployment's environment.
  *
@@ -11,8 +13,10 @@ import Link from "next/link";
 export function Nav() {
   const hasDatabase = Boolean(process.env.DATABASE_URL);
   // The upload-a-PDF-and-scan-now page shells out to python. That exists on a
-  // checkout, never on the deployment.
-  const hasLocalScan = process.env.SCOUT_LOCAL_SCAN === "1";
+  // checkout, never on the deployment. Keyed off the script itself rather than
+  // SCOUT_LOCAL_SCAN alone: that env var is a test switch, and requiring it hid
+  // the link on every ordinary `npm run dev`, where the feature works fine.
+  const hasLocalScan = localScanAvailable();
 
   const links: Array<{ href: string; label: string; testid: string }> = [
     { href: "/matches", label: "Matches", testid: "nav-link-matches" },

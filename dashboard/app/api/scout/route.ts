@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 
 import { requireSession } from "@/lib/apiAuth";
 import { authConfigured } from "@/lib/auth";
+import { REPO_ROOT, SCOUT_SCRIPT, localScanAvailable } from "@/lib/localScan";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,8 +23,6 @@ import path from "node:path";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const REPO_ROOT = process.env.SCOUT_REPO_ROOT ?? path.resolve(process.cwd(), "..");
-const SCOUT_SCRIPT = path.join(REPO_ROOT, "scripts", "scout.py");
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 // adzuna/jooble are accepted but no-op unless their API keys are in the server
 // env; scout.py logs the skip and the scan continues on the other sources.
@@ -136,7 +135,7 @@ export async function POST(request: NextRequest) {
   // so it fails -- but it fails as a timeout after several minutes, which reads
   // as "my CV broke it". Refusing up front, with the reason, is the honest
   // version. Scheduled scans are the deployed path; see /profiles.
-  if (process.env.SCOUT_LOCAL_SCAN !== "1" && !existsSync(SCOUT_SCRIPT)) {
+  if (!localScanAvailable()) {
     return NextResponse.json(
       {
         error:

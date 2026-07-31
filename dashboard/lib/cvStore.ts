@@ -79,7 +79,11 @@ export async function loadConfig(): Promise<ConfigLoad> {
       profiles: await readProfiles(CONFIG_ROOT),
       backend: "local",
       origin: path.join(CONFIG_ROOT, PROFILES_PATH),
-      writable: true,
+      // A serverless filesystem accepts the write and loses it at the next cold
+      // start, so reporting it writable is worse than reporting it read-only:
+      // the page would promise a save it cannot keep. The header comment says
+      // this path is for a checkout; on Vercel it is a missing-token symptom.
+      writable: !process.env.VERCEL,
       error: null,
     };
   } catch (err) {
