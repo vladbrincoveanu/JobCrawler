@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "test-cv",
+      "label": "Test CV",
+      "enabled": true,
+      "schedule": { "hours_utc": [5], "weekdays_only": false },
+      "filters": {
+        "days": 7,
+        "top": 50,
+        "require_salary": false,
+        "sources": "apis,karriere"
+      },
+      "alert": { "min_match": 75 }
+    }
+  ]
+}

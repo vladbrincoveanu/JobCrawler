@@ -14,10 +14,16 @@ import { defineConfig, devices } from "@playwright/test";
  */
 const PORT = Number(process.env.DASHBOARD_PORT ?? 3011);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+// One fixture scan, reached two ways: as the legacy single feed (SCOUT_FEED_PATH)
+// and as CV "test-cv"'s per-CV feed (SCOUT_FEED_DIR + the fixture config root).
+// Deliberately the same file -- two copies would drift, and the whole point of
+// the per-CV migration is that both paths render the same scan.
 const FEED_FIXTURE = require("node:path").resolve(
   __dirname,
-  "tests/fixtures/scout-feed.json",
+  "tests/fixtures/feed/results/test-cv.json",
 );
+const FEED_DIR = require("node:path").resolve(__dirname, "tests/fixtures/feed");
+const CONFIG_ROOT = require("node:path").resolve(__dirname, "tests/fixtures/config");
 const TEST_DATABASE_URL =
   process.env.DATABASE_URL ??
   "postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test";
@@ -63,6 +69,7 @@ export default defineConfig({
     command:
       `npx next build && DATABASE_URL=${TEST_DATABASE_URL} ` +
       `SCOUT_FEED_PATH=${FEED_FIXTURE} SCOUT_LOCAL_SCAN=1 ` +
+      `SCOUT_FEED_DIR=${FEED_DIR} SCOUT_CONFIG_ROOT=${CONFIG_ROOT} ` +
       `npx next start --port ${PORT}`,
     // Readiness is probed on /scout, NOT on "/". The overview page queries
     // PostgreSQL while rendering, and with no database running that request

@@ -43,37 +43,62 @@ Several boards omit it, and treating undated as old would make them vanish the
 moment the filter was touched — looking like "no new jobs" rather than "this
 board doesn't date its ads".
 
-### `/matches` — the scheduled scan
+### `/matches` — the scheduled scan, per CV
 
-`/matches` shows the last scan produced by the `scout-cron` GitHub Actions
-workflow, so the dashboard has jobs in it without anyone uploading anything.
-It reads, in priority order:
+`/matches?cv=<id>` shows the last scan the `scout-cron` workflow produced for
+one CV, with a switcher across all configured CVs that carries each one's
+last-run state. The failure worth seeing is a single CV that stopped running
+while the others kept going; without that per-tab state it renders as a quiet
+week.
 
-1. `SCOUT_FEED_URL` — raw URL of `latest.json` on the `scout-data` branch, for
-   a deployed dashboard with no checkout to read from;
-2. `data/scout/latest.json` in the repo (also settable via `SCOUT_FEED_PATH`).
+The feed is read, in priority order:
 
-No feed yet is a normal empty state with setup instructions. A feed that exists
-but will not parse is reported as an error — a broken cron must not hide behind
-a friendly "nothing yet".
+1. `SCOUT_FEED_BASE_URL` — raw base URL of the `scout-data` branch, e.g.
+   `https://raw.githubusercontent.com/<owner>/<repo>/scout-data`. Files under it
+   are `results/<cv-id>.json` and `runs/<cv-id>.json`. **This is what the
+   deployment uses.**
+2. `SCOUT_FEED_URL` — the legacy single feed, kept for one release.
+3. `SCOUT_FEED_DIR` (default `data/scout/`) — a local checkout of that branch.
+
+No feed yet — a 404 or a missing file — is a normal empty state. A feed that
+exists but will not parse is reported as an error: a broken cron must not hide
+behind a friendly "nothing yet".
+
+### `/profiles` — the control panel
+
+Which CVs are scanned, when, with what filters, and above what match percentage
+they trigger a Telegram alert. Saving commits `scout/profiles.json` on the
+default branch — the same file the workflow reads, so the page and the cron
+cannot drift. "Scan now" dispatches the workflow rather than scanning here.
+
+Reading is public (`scout/` is a committed, public directory anyway). Writing
+needs a session; see **Deployment** below.
+
+> The route is `/profiles`, not `/cvs`, because the Vercel CLI's upload filter
+> silently drops directories named like version-control metadata — `.git`,
+> `.svn`, `CVS`. `app/cvs/` built locally and 404'd in production with nothing
+> in the build log to say why.
 
 ### Scheduled scans (GitHub Actions)
 
-`.github/workflows/scout-cron.yml` runs daily at 05:30 UTC and on demand
-(Actions → scout-cron → Run workflow, with `days`/`top`/`sources`/
-`require_salary` inputs). It publishes `latest.json` plus a timestamped copy
-to the **`scout-data`** branch, and uploads the same file as an artifact.
+`.github/workflows/scout-cron.yml` wakes hourly and asks `scripts/cv_schedule.py`
+which CVs are due, per each profile's own `hours_utc`. It also runs on demand
+(Actions → scout-cron → Run workflow, with `cv_id` and `force` inputs — which is
+exactly what the dashboard's "Scan now" sends).
 
-The CV never lives in this repository — it is passed as a secret and exists
-only on the runner:
+It publishes `results/`, `runs/` and `sent/` to the **`scout-data`** branch.
 
-```bash
-base64 -w0 /path/to/cv.pdf | gh secret set CV_PDF_BASE64   # -i instead of -w0 on macOS
-```
+No CV PDF is involved: the runner reads `scout/profiles/<id>.json`, roughly
+600 bytes of `{skills, role_titles, source}`. Nothing else may be written there
+— `dashboard/lib/cvProfiles.ts` rejects (does not strip) any other key, any
+email-, phone- or credential-shaped value, and PII-shaped map *keys* as well as
+values. `scout/` is world-readable and a public branch's history stays readable
+after the field stops being written.
 
-Optional secrets: `NVIDIA_API_KEY` (LLM profile extraction, rerank, and
-employer pros/cons), `ADZUNA_APP_ID` + `ADZUNA_APP_KEY`, `JOOBLE_KEY`. With no
-LLM key the run still works — keyword scoring, no review panels.
+Required secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Optional:
+`NVIDIA_API_KEY` (LLM profile extraction and rerank), `ADZUNA_APP_ID` +
+`ADZUNA_APP_KEY`, `JOOBLE_KEY`. With no LLM key the run still works — keyword
+scoring only.
 
 ### Employer pros/cons
 
@@ -103,6 +128,43 @@ does not literally appear in an ad ("event-driven" vs "message queues"), which
 keyword scoring misses — but it needs an embedding model, a backfill over every
 crawled job, and the scout does not read from Postgres at all today. Keyword
 scoring was the honest first pass; the column stays reserved.
+
+## Deployment (Vercel)
+
+The dashboard is deployed at **https://jobcrawler-scout.vercel.app** and is the
+intended way to use it. Vercel has a read-only filesystem and no Python, so the
+deployed app does not scan and does not write files: it commits configuration to
+this repository and dispatches the workflow that owns scanning.
+
+Project root is `dashboard/`. Deploy with:
+
+```bash
+cd dashboard && vercel deploy --prod
+```
+
+Environment variables (Vercel project settings, all three environments):
+
+| Variable | Purpose | Without it |
+|---|---|---|
+| `SCOUT_FEED_BASE_URL` | Raw base URL of the `scout-data` branch | Every board is empty |
+| `GITHUB_REPO` | `owner/name` of this repository | Config falls back to a local file that does not exist on Vercel |
+| `GITHUB_BRANCH` | Default `main` | — |
+| `GITHUB_TOKEN` | Fine-grained PAT, **Contents: read/write** and **Actions: read/write**, scoped to this repo only | The CV list is empty and saves and "Scan now" both refuse |
+| `DASHBOARD_PASSWORD` | The one password for the one user | Reads work; every write is refused with 503 |
+
+`DATABASE_URL` is deliberately **not** set: the crawler pages (`/`, `/jobs`,
+`/runs`) query PostgreSQL, and `pg` hangs rather than erroring on an unreachable
+host, so the whole site would read as down. With it unset those routes drop out
+of the nav and `/` redirects to `/matches`.
+
+Nothing here stores a credential. `/profiles` reports which are present *by
+name* and prints `gh secret set KEY` for the missing ones — that command prompts
+on your own terminal, so the value never enters a request body, a response, or
+shell history.
+
+Writes are confined to `scout/`: the same token can reach `.github/workflows`,
+and a config editor that can rewrite its own CI is a different thing entirely.
+
 
 ## Quickstart — crawler + dashboard (needs Postgres)
 
@@ -142,6 +204,11 @@ DATABASE_URL=postgresql://jobcrawler:dev@localhost:5433/jobcrawler \
 # Dashboard
 cd dashboard && npx playwright test
 
+# Just the pure-Node lib specs (cvProfiles, credentials, feed, github, auth).
+# PW_NO_SERVER skips booting Next for them: it costs a two-minute build they
+# never use, and where listen(2) is denied it fails as "0 tests ran".
+cd dashboard && PW_NO_SERVER=1 npx playwright test tests/{cv-profiles,credentials,feed,github,auth}.spec.ts
+
 # Include the live scan (real network, real job boards)
 cd dashboard && SCOUT_LIVE=1 npx playwright test
 
@@ -155,9 +222,17 @@ only runs under Postgres can drift unnoticed for a long time. Several had —
 they asserted against a fixture `seed_demo_data.py` does not produce — and were
 corrected the first time the suite was actually run with a database up.
 
-`/matches` is tested against `dashboard/tests/fixtures/scout-feed.json`, wired
-in by `playwright.config.ts` via `SCOUT_FEED_PATH`, so the suite never reads (or
-overwrites) a real scan sitting in `data/scout/`.
+`/matches` and `/profiles` are tested against `dashboard/tests/fixtures/`, wired
+in by `playwright.config.ts`: `config/` supplies one CV profile and
+`feed/results/test-cv.json` its scan. The suite therefore never reads (or
+overwrites) the real `scout/profiles.json` or a real scan in `data/scout/`. That
+one fixture file is reached both as the per-CV feed and, via `SCOUT_FEED_PATH`,
+as the legacy single feed — two copies would drift, and the point of the
+migration is that both render the same scan.
+
+`DASHBOARD_PASSWORD` is deliberately unset for the test server, so the suite
+asserts the fail-closed case: an unauthenticated deployment renders the config
+read-only and answers 503 to a POST aimed straight at the API.
 
 ## Status
 
