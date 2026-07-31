@@ -262,9 +262,15 @@ Coverage gate stays at ≥90% (`--cov=crawler --cov-fail-under=90`).
 
 ## Risks
 
-1. **The cron publish path has never executed on GitHub.** The whole design
-   rests on the orphan-branch publish working. Verified before any building —
-   this is step 0 of the plan, not an afterthought.
+1. ~~**The cron publish path has never executed on GitHub.**~~ **Verified
+   locally, and it was broken.** Replaying the publish step against a throwaway
+   branch showed the orphan-create path works but the update path fails on every
+   run after the first: `actions/checkout` sets a narrow fetch refspec, so
+   `git fetch origin $FEED_BRANCH` never creates `origin/$FEED_BRANCH` and the
+   checkout dies with `not a commit`. Fixed by checking out `FETCH_HEAD`;
+   re-verified across two runs with history accumulating correctly and the raw
+   URL readable. Note this was verified with local git plumbing, not on an
+   Actions runner — the runner environment itself is still unexercised.
 2. **GitHub disables scheduled workflows on public repos after 60 days without
    commits.** Silent failure: alerts simply stop. The workflow logs a heartbeat
    into `runs/` so a stale timestamp is visible on the dashboard.

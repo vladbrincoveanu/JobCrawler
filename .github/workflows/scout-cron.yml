@@ -160,7 +160,12 @@ jobs:
           # every consumer of this repo has to read.
           if git ls-remote --exit-code --heads origin "$FEED_BRANCH" >/dev/null 2>&1; then
             git fetch --depth=1 origin "$FEED_BRANCH"
-            git checkout -B "$FEED_BRANCH" "origin/$FEED_BRANCH"
+            # FETCH_HEAD, not origin/$FEED_BRANCH: actions/checkout configures a
+            # narrow fetch refspec for the branch it checked out, so fetching a
+            # second branch never creates its remote-tracking ref. Using
+            # origin/$FEED_BRANCH fails with "not a commit" on every run after
+            # the first -- the orphan-create path works, the update path does not.
+            git checkout -B "$FEED_BRANCH" FETCH_HEAD
           else
             git checkout --orphan "$FEED_BRANCH"
             git rm -rf --cached . >/dev/null 2>&1 || true
