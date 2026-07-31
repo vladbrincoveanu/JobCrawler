@@ -32,7 +32,9 @@ alerted, switch to another, create more.
 | Config → GitHub | UI writes files, user commits | Nothing is pushed unattended to a **public** repo |
 | Scan-now feedback | Stream per-source progress | A scan takes 30s–4m18s; a blank spinner already read as "hung" |
 | Alert credentials | Entered in the UI, written to gitignored `.env.local`; user mirrors to GitHub secrets | Public repo — a committed token is a published token; no PAT stored in the app |
-| Company reviews | Only for the published top-N matches | They are ~99% of scan runtime; reviews nobody sees are not worth paying for |
+| Company reviews | **Local only.** Dropped from the cron entirely | The runner's cache is always cold and its results can't reach the Mac once stripped from the feed; enriching where the cache lives costs nothing |
+| Who sends alerts | `scripts/alerts.py`, sole owner. `scout.py`'s native Telegram path stays for manual CLI use, documented legacy | Two senders with two sent-stores would drift; the cron already runs `--json-out`, which returns before that path |
+| Alert threshold field | `match_pct`, not `fit` | `fit` is only set when `NVIDIA_API_KEY` is present, so a `fit >= 75` cutoff silently alerts nothing without a key |
 
 ## Critical constraint: the repository is public
 
@@ -52,6 +54,16 @@ compressed), so one-secret-per-CV is not viable regardless.
 
 **Rule:** `scout/` is a public directory. Any field added to it is published.
 The file carries a header comment saying so.
+
+**Company reviews are never published.** `company_review` is stripped from
+anything written to `scout-data`. Today it is not: `scout-cron.yml` runs with
+`--company-reviews`, `scout.py:1019` copies the field into every published job,
+and the result is committed to a public branch — so model-*generated* cons about
+named real employers ("management churn", "low pay") are world-readable right
+now, with `company_reviews.py`'s own "not a source of fact, may invent something
+plausible for a small company" caveat living only in the dashboard UI. Dropping
+`--company-reviews` from the cron removes the source; the publish step strips the
+key regardless, so a hand-run local scan cannot leak it either.
 
 ## Architecture
 
@@ -90,16 +102,30 @@ each scheduled run cheaper too: no PDF parse, no LLM profile-extraction call.
         "require_salary": false,
         "sources": "apis,karriere,adzuna,jooble"
       },
-      "alert": { "min_fit": 75 }
+      "alert": { "min_match": 75 }
     }
   ]
 }
 ```
 
 `schedule` is **one** form only: `hours_utc` is an explicit list of UTC hours at
-which this CV runs. Daily-at-05:00 is `[5]`; twice a day is `[5, 15]`; hourly is
-`[0..23]`. There is no `every: "24h"` field — expressing the same schedule two
-ways is how the two drift apart.
+which this CV runs. Daily-at-05:00 is `[5]`; twice a day is `[5, 15]`. There is
+no `every: "24h"` field — expressing the same schedule two ways is how the two
+drift apart.
+
+**At most 4 entries per CV**, rejected by `lib/cvProfiles.ts` on write. Job ads
+do not turn over hourly, so the cap costs nothing real, and it makes a runaway
+config (`[0..23]` × 4 CVs) unreachable rather than merely unlikely.
+
+`min_match` compares against `match_pct` — the deterministic skill-overlap
+number from `match_evidence()`, set unconditionally in the `--json-out` path.
+Deliberately **not** `fit`: `llm_rerank()` (`scout.py:527`) only runs when
+`NVIDIA_API_KEY` is set, so a `fit`-based threshold sends nothing at all, and
+sends it silently, on a keyless runner.
+
+`hours_utc` is UTC, so `[5]` is 07:00 in Vienna in summer and 06:00 in winter.
+Accepted: a one-hour seasonal drift on a pre-working-day scan is not worth a
+timezone field and its DST edge cases.
 
 ### Profile precedence
 
@@ -124,9 +150,15 @@ as today.
 
 | Path | Contents | Read by |
 | --- | --- | --- |
-| `results/<id>.json` | Latest ranked matches for that CV | Dashboard match board |
-| `sent/<id>.json` | Alert dedupe: fingerprints already pushed | Alert step |
-| `runs/<id>.json` | Last-run timestamp + status + counts | Due-check, status strip |
+| `results/<id>.json` | Latest ranked matches for that CV, **without `company_review`** | Dashboard match board |
+| `sent/<id>.json` | Alert dedupe: `fingerprint -> {sent_date, title, company}` | Alert step |
+| `runs/<id>.json` | Last-attempt timestamp + status (`ok`/`error`) + slot + counts | Due-check, status strip |
+
+`sent/<id>.json` mirrors today's `data/sent_jobs.json` shape rather than being a
+bare hash list: entries older than **90 days are dropped on write**, so a genuine
+repost re-alerts and the file stays bounded on a branch nothing ever prunes. The
+stored title and company are what makes "why did this not alert me" answerable —
+a list of md5 hashes is not debuggable.
 
 Per-CV `sent/` is required, not cosmetic: today's `data/sent_jobs.json` is a
 single global map. Shared, an ad alerted for the DevOps CV would be silently
@@ -136,11 +168,26 @@ suppressed for the Backend CV, which is precisely the case the user cares about.
 
 ### Due-check
 
-The hourly cron wakes every hour, reads `profiles.json`, and runs a CV when
-`enabled` and the current UTC hour is in `schedule.hours_utc` and
-`runs/<id>.json` shows no successful run in this hour. Scans run sequentially;
-four CVs at the observed worst case (~4m18s) is ~17 minutes, well inside the
-6-hour job limit. `concurrency.group` stays, `cancel-in-progress: false`.
+The hourly cron wakes every hour, reads `profiles.json`, and for each `enabled`
+CV computes its **due slot**: the newest entry in `hours_utc` at or before now.
+The CV runs when that slot is less than 6 hours old and `runs/<id>.json` shows no
+successful run for it.
+
+Not exact-hour equality. GitHub delays scheduled workflows on public repos by
+5–20+ minutes routinely and drops ticks under load; a 05:00 slot firing at 06:04
+would fail an `hour in hours_utc` test and that day's scan would vanish with no
+error anywhere. The window lets the next wake pick it up.
+
+**Failure is recorded.** A crashed scan writes `runs/<id>.json` with
+`status: "error"` and its slot, and that slot gets **one** retry on the next wake
+before being abandoned until its next scheduled hour. Without a written failure
+record the window sees "no successful run" and re-runs a hard failure every hour
+for six hours; without any retry, one transient network blip costs a whole day.
+
+Scans run sequentially. With company reviews out of the cron (below) a scan is
+~9s of source fetching plus rerank, so four CVs is around a minute rather than
+the previously measured ~17. `concurrency.group` stays, `cancel-in-progress:
+false`.
 
 ### Quiet first run
 
@@ -149,17 +196,31 @@ and pushes nothing**. Without this, day one is four CVs × up to 50 matches ≈ 
 Telegram messages. The dashboard still shows the full board immediately; only
 the push is suppressed, and only once per CV.
 
-### Company review budget
+### Company reviews are local, not scheduled
 
-Company review enrichment is the entire runtime cost of a scan — ~9 seconds of
-source fetching against 10+ minutes of sequential LLM calls, one per unseen
-company across all 242 scored jobs.
+Company review enrichment is the entire runtime cost of a scan: ~9 seconds of
+source fetching against minutes of sequential LLM calls, one per unseen company.
 
-**Rule:** enrich only the matches actually published (`filters.top`, default 50),
-never the full scored set. Reviews the user cannot see are not worth paying for.
-This cuts calls by roughly an order of magnitude and keeps the existing
-`data/company_reviews` disk cache, which makes repeat runs near-free. A cold
-four-CV cron wake stays in minutes rather than an hour.
+An earlier draft of this spec proposed "enrich only the published top-N" as the
+fix. **That is already the shipped behaviour** — `scout.py:986` enriches
+`output_jobs`, after the `--top` cut, and `--company-review-limit` (`scout.py:863`)
+already caps lookups at 20 distinct companies per run. There was no order of
+magnitude left to cut. The measured 4m18s run was already bounded.
+
+The real cost driver is that `data/company_reviews/` is **gitignored**
+(`.gitignore:96`), so the cache never reaches a runner: every wake pays 20 cold
+LLM calls per CV, forever, and paid for them again the next hour. Warming that
+cache in CI does not help either, because the reviews then have no way back to
+the local dashboard once they are stripped from the published feed (below).
+
+**Rule:** the cron does not pass `--company-reviews` at all. Enrichment runs
+locally, on the machine where the disk cache lives and where the dashboard reads
+it, warm across runs and shared between all four CVs. This removes the cold-cache
+cost, the per-wake LLM bill and the need for any CI cache layer in one move.
+
+Consequence: a match that only the cron has ever seen has no review panel until a
+local scan or an on-render lookup fills it. That is the correct trade — the
+panels are decoration on a board whose job is to rank ads.
 
 ### Credentials
 
@@ -184,10 +245,20 @@ alert will send, until those secrets are set on the repo.
 
 ### Alerting
 
-For each scanned CV: take matches with `fit >= alert.min_fit`, drop any
+For each scanned CV: take matches with `match_pct >= alert.min_match`, drop any
 fingerprint already in `sent/<id>.json`, push the rest to Telegram as chunked
-messages (chunking already exists), then append the fingerprints. Failure to
-send must not lose the results — write `results/` before attempting the push.
+messages (chunking already exists), then append the fingerprints with today's
+date. Failure to send must not lose the results — write `results/` before
+attempting the push.
+
+**`scripts/alerts.py` is the only sender.** `scout.py` already contains a
+complete, different alerting path (`scout.py:1046-1078`): a global
+`data/sent_jobs.json`, dedupe applied *before* ranking rather than thresholding
+after it, its own `--top` cut and its own `generate_dashboard()`. That path is
+unreachable from the cron — `--json-out` returns at `scout.py:1044`, before it —
+and it stays exactly as it is for manual CLI use, documented as legacy. It is not
+extended and it does not learn about per-CV state; two senders sharing a concept
+of "already sent" is how the two stores drift into disagreeing.
 
 ### Deleting a CV
 
@@ -212,9 +283,19 @@ working tree and shows the resulting diff. The user commits and pushes.
 
 **Constraint:** config writing requires the dashboard to run locally
 (`npm run dev`) with the repo root as its parent. The Docker container mounts
-only `./dashboard`, so it cannot reach `scout/` — in the container the config
-editor renders read-only with an explanatory notice. This is a real limitation
-of the chosen sync model, not a bug to fix later.
+only `./dashboard` (`docker-compose.yml:36`), so it reaches neither `scout/` nor
+`data/company_reviews/`. In the container: the config editor renders read-only
+with an explanatory notice, and no review panels render. This is a real
+limitation of the chosen sync model, not a bug to fix later.
+
+The container is also worse off than that today, and this is a bug. `lib/feed.ts`
+resolves `REPO_ROOT` as `cwd/..`, which inside the container is `/`; the read of
+`/data/scout/latest.json` ENOENTs, and that file treats ENOENT as the *innocuous*
+"nobody has run the cron yet" empty state. So the containerised board silently
+shows nothing, with no error, whatever the feed actually contains. Fix:
+`docker-compose.yml` sets `SCOUT_FEED_URL` to the `scout-data` raw URL, so the
+container reads the published feed over HTTP — the path `feed.ts` already
+supports and prefers.
 
 ### Scan-now streaming
 
@@ -228,7 +309,8 @@ spinner.
 
 ### Module: `lib/cvProfiles.ts`
 - **Responsibility:** Read, validate and write `scout/profiles.json`.
-- **Interface:** In — profile objects. Out — typed profile list; write returns the changed paths. Throws on duplicate/invalid id, empty `hours_utc`, `min_fit` outside 0–100.
+- **Interface:** In — profile objects. Out — typed profile list; write returns the changed paths. Throws on duplicate/invalid id, empty `hours_utc`, more than 4 `hours_utc` entries, `min_match` outside 0–100.
+- **PII gate:** a profile write is stripped to exactly `{skills, role_titles, source}` and hard-fails on any other key, on an email/phone-shaped value, or on a token-shaped value. Risk 4 said "enforced by a header comment and review"; this makes it enforced by code, using the same mechanism the credentials boundary already commits to. Ten lines, and it turns "someone notices in a diff" into "it cannot be written".
 - **Dependencies:** `node:fs`, repo-root resolution (`SCOUT_REPO_ROOT`).
 - **Size target:** ~150 lines.
 
@@ -269,9 +351,9 @@ spinner.
 - **Size target:** +60 lines on the existing file.
 
 ### Module: `scripts/alerts.py`
-- **Responsibility:** Threshold-filter a result set, apply per-CV sent-state (including quiet first run), push Telegram.
-- **Interface:** In — results JSON, CV id, `min_fit`. Out — updated `sent/<id>.json`; sends messages.
-- **Dependencies:** `scout.py`'s `send_telegram()` and `resolve_telegram()`.
+- **Responsibility:** Threshold-filter a result set on `match_pct`, apply per-CV sent-state (including quiet first run and 90-day expiry), push Telegram. Sole owner of sending for scheduled runs.
+- **Interface:** In — results JSON, CV id, `min_match`. Out — updated `sent/<id>.json`; sends messages.
+- **Dependencies:** `scout.py`'s `send_telegram()` and `resolve_telegram()` only. Does not touch `load_sent`/`save_sent` or `data/sent_jobs.json`.
 - **Size target:** ~150 lines.
 
 ### Module: `.github/workflows/scout-cron.yml` (exists — rewrite)
@@ -295,12 +377,23 @@ screenshots and not "it compiles".
 
 **pytest:**
 - `--profile` path skips extraction and produces the same scoring as a PDF run.
-- Due-check: correct hour runs, wrong hour skips, disabled skips, already-run-this-hour skips.
+- Due-check: correct slot runs, disabled skips, already-succeeded-for-this-slot
+  skips, a slot older than the 6h window skips, and — the case exact-hour
+  matching got wrong — **a wake at 06:04 still runs the 05:00 slot**.
+- Failure path: a crashed scan writes `status: "error"`, the next wake retries
+  that slot exactly once, and the wake after that does not.
 - Per-CV sent-state isolation: same ad alerts on two CVs independently.
+- Sent entries older than 90 days are dropped, and the ad they referenced alerts
+  again.
 - Quiet first run pushes nothing and records everything.
-- Company reviews are requested only for published matches, not the scored set.
-- `lib/credentials.ts` refuses to write anywhere but `.env.local`, and a
-  token-shaped value offered to a profile write is rejected, not published.
+- Threshold uses `match_pct`: with `NVIDIA_API_KEY` unset (so no `fit` on any
+  job) a match above `min_match` **still alerts**. This is the regression test
+  for the silent-no-alerts failure mode.
+- The cron passes no `--company-reviews`, and nothing written to `scout-data`
+  carries a `company_review` key even when the input result set has one.
+- `lib/credentials.ts` refuses to write anywhere but `.env.local`; a profile
+  write carrying a token-shaped, email-shaped or unknown key is rejected, not
+  published.
 
 Coverage gate stays at ≥90% (`--cov=crawler --cov-fail-under=90`).
 
@@ -323,10 +416,23 @@ Coverage gate stays at ≥90% (`--cov=crawler --cov-fail-under=90`).
    Adzuna+Jooble 0.1s, all sources with `--no-llm` ~9s total. The same run with
    `--company-reviews` exceeded **10 minutes**. Company review enrichment makes
    one sequential LLM call per unseen company; the 29.7s run had a warm
-   `data/company_reviews` cache, the 4m18s run did not. Bounded by the top-N
-   rule below.
-4. **`scout/` is public.** Profiles are PII-free today, but every future field
-   added there is published. Enforced by a header comment and review, not code.
+   `data/company_reviews` cache, the 4m18s run did not. The earlier "bound it to
+   top-N" mitigation was a no-op — that bound already shipped. Resolved instead
+   by taking reviews out of the cron entirely, so the runner never pays it.
+4. ~~**`scout/` is public**, enforced by comment and review~~ — now enforced by
+   the key whitelist in `lib/cvProfiles.ts`. The residual risk is a *deliberate*
+   future widening of that whitelist, which a header comment does still only warn
+   about.
+5. **Generated employer cons are already on a public branch.** Every `scout-data`
+   commit to date carries `company_review` inside `latest.json`. Dropping it from
+   future writes does not unpublish the existing history; those commits stay
+   readable unless the branch is rewritten. Decide separately whether to force-
+   push `scout-data` clean — out of scope here, flagged so it is not forgotten.
+6. **`.claude/rules/ui-testing.md` gates on routes that do not exist.** It names
+   `/`, `/dashboard` and `/dashboard/map`; this app serves `/`, `/jobs`, `/runs`,
+   `/scout` and `/matches`. The final-gate check has therefore never verified the
+   pages it was meant to. Not fixed here — it is a rules file, not this design —
+   but the UI work in this spec is gated by it and should update it first.
 
 ## Out of scope
 
