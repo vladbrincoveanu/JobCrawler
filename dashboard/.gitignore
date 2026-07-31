@@ -10,3 +10,8 @@ test-results/
 .env*.local
 .vercel
 .env*
+
+# Alternate build dirs (NEXT_DIST_DIR): the test suite writes .next-test/ and
+# ad-hoc verification builds write .next-verify/. Not ignoring these made a
+# `vercel deploy` upload 71 MB of build output and fail.
+.next-*/

@@ -1,0 +1,15 @@
+# Explicit, because the CLI's fallback to .gitignore is not reliable here: a
+# deploy was uploading 71 MB of local build output, and the alternate build dirs
+# the test suite writes (NEXT_DIST_DIR=.next-test) were not covered at all.
+#
+# Do NOT add a directory named like version-control metadata to this project --
+# the CLI drops .git/.svn/CVS-shaped paths from the upload silently, which is
+# how app/cvs/ built locally and 404'd in production. That route is /profiles.
+node_modules
+.next
+.next-*
+test-results
+playwright-report
+.playwright
+*.tsbuildinfo
+tests
