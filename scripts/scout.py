@@ -53,6 +53,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import buckets as buckets_mod
+import company_reviews as company_reviews_mod
 from sources import job_apis, karriere_at, stepstone_at
 
 JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
@@ -854,6 +855,13 @@ def parse_args() -> argparse.Namespace:
                         help="which immo-scouter bot to use (default dev)")
     parser.add_argument("--telegram-config", type=Path, default=IMMO_CONFIG)
     parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
+    parser.add_argument("--company-reviews", action="store_true",
+                        help="attach model-generated employer pros/cons to each match "
+                             "(needs NVIDIA_API_KEY; results are cached in "
+                             "data/company_reviews/ and are NOT scraped from Glassdoor "
+                             "or any review site -- see scripts/company_reviews.py)")
+    parser.add_argument("--company-review-limit", type=int, default=20,
+                        help="max distinct companies to look up per run (default 20)")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="write the full ranked/scored match list as JSON to this "
                              "path instead of sending Telegram or printing a digest "
@@ -968,6 +976,20 @@ def main() -> int:
             llm_rerank(output_jobs, profile, api_key)
         for job in output_jobs:
             job["match_pct"], job["matched_skills"] = match_evidence(job, profile)
+        # Enrichment last, and only over the jobs that survived the --top cut:
+        # it costs one LLM call per unseen company, so paying for companies
+        # that never reach the output would be waste.
+        if args.company_reviews and output_jobs:
+            if not api_key:
+                log("--company-reviews needs NVIDIA_API_KEY; skipping enrichment")
+            else:
+                company_reviews_mod.annotate(
+                    output_jobs,
+                    lambda prompt: nvidia_chat(api_key, prompt, max_tokens=500),
+                    NVIDIA_MODEL,
+                    limit=args.company_review_limit,
+                    log=log,
+                )
         result = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "cv": str(args.cv),
@@ -994,6 +1016,7 @@ def main() -> int:
                     "fit": j.get("fit"),
                     "reason": j.get("reason"),
                     "bucket": j.get("bucket"),
+                    "company_review": j.get("company_review"),
                 }
                 for j in output_jobs
             ],

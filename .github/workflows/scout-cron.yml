@@ -1,0 +1,181 @@
+name: scout-cron
+
+# Scheduled CV-matched job scan.
+#
+# Runs scripts/scout.py against the sources this project is actually allowed to
+# use -- the free no-auth job APIs, karriere.at, and Adzuna/Jooble when their
+# keys are configured -- and publishes the ranked result as JSON. The dashboard
+# reads that JSON on /matches, so the page has jobs in it without anyone
+# uploading a CV first.
+#
+# The CV never lives in this repository. It is passed in as the CV_PDF_BASE64
+# secret and only ever exists on the runner, in a file deleted with the runner.
+#
+# Setup (one time):
+#   base64 -i /path/to/cv.pdf | pbcopy       # macOS; use `base64 -w0` on Linux
+#   gh secret set CV_PDF_BASE64              # paste
+# Optional secrets: NVIDIA_API_KEY (LLM profile/rerank + company reviews),
+#   ADZUNA_APP_ID + ADZUNA_APP_KEY, JOOBLE_KEY.
+
+on:
+  schedule:
+    # 05:30 UTC daily — before the Vienna working day, after most boards have
+    # published the previous evening's ads.
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Only ads posted within this many days"
+        default: "7"
+      top:
+        description: "How many matches to publish"
+        default: "50"
+      sources:
+        description: "Comma-separated sources (apis,karriere,adzuna,jooble,stepstone)"
+        default: "apis,karriere,adzuna,jooble"
+      require_salary:
+        description: "Drop ads that state no salary"
+        type: boolean
+        default: false
+
+concurrency:
+  group: scout-cron
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # A full scan is minutes, not seconds (karriere.at is rate-limited to about
+    # one request a second on purpose). This cap is a runaway guard, not a
+    # target.
+    timeout-minutes: 45
+    env:
+      FEED_BRANCH: scout-data
+      SCOUT_DAYS: ${{ inputs.days || '7' }}
+      SCOUT_TOP: ${{ inputs.top || '50' }}
+      SCOUT_SOURCES: ${{ inputs.sources || 'apis,karriere,adzuna,jooble' }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+      ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+      JOOBLE_KEY: ${{ secrets.JOOBLE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install scout dependencies
+        # Only the scout extra: the crawler half needs Playwright and Postgres,
+        # neither of which this job touches.
+        run: pip install requests duckdb pypdf
+
+      - name: Materialise the CV from the secret
+        env:
+          CV_PDF_BASE64: ${{ secrets.CV_PDF_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CV_PDF_BASE64:-}" ]; then
+            echo "::error::CV_PDF_BASE64 secret is not set. Without a CV there is" \
+                 "nothing to match against. Run: base64 -w0 cv.pdf | gh secret set CV_PDF_BASE64"
+            exit 1
+          fi
+          printf '%s' "$CV_PDF_BASE64" | base64 -d > "$RUNNER_TEMP/cv.pdf"
+          # A truncated or wrongly-encoded secret decodes to something that is
+          # not a PDF; catch that here rather than as an opaque pypdf traceback.
+          if [ "$(head -c 5 "$RUNNER_TEMP/cv.pdf")" != "%PDF-" ]; then
+            echo "::error::CV_PDF_BASE64 did not decode to a PDF (no %PDF- header)."
+            exit 1
+          fi
+          echo "CV decoded: $(wc -c < "$RUNNER_TEMP/cv.pdf") bytes"
+
+      - name: Scan job sources
+        run: |
+          set -euo pipefail
+          ARGS=(--dry-run
+                --cv "$RUNNER_TEMP/cv.pdf"
+                --sources "$SCOUT_SOURCES"
+                --days "$SCOUT_DAYS"
+                --top "$SCOUT_TOP"
+                --json-out data/scout/latest.json)
+          if [ "${{ inputs.require_salary }}" = "true" ]; then
+            ARGS+=(--require-salary)
+          fi
+          # The LLM steps (profile extraction, rerank, employer pros/cons) are
+          # all gated on the same key. With no key the run still works: scoring
+          # falls back to the keyword lexicon and no review panels are produced.
+          if [ -n "${NVIDIA_API_KEY:-}" ]; then
+            ARGS+=(--company-reviews)
+          else
+            ARGS+=(--no-llm)
+            echo "::notice::NVIDIA_API_KEY not set — keyword scoring, no company reviews."
+          fi
+          python scripts/scout.py "${ARGS[@]}"
+
+      - name: Summarise the scan
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          d = json.loads(pathlib.Path("data/scout/latest.json").read_text())
+          jobs = d["jobs"]
+          with_salary = sum(1 for j in jobs if j.get("salary"))
+          reviewed = sum(1 for j in jobs if j.get("company_review"))
+          print(f"## {len(jobs)} matches published")
+          print(f"- {d['total_matches']} scored, top {len(jobs)} published")
+          print(f"- profile source: {d.get('profile_source')}")
+          print(f"- {with_salary} state a salary · {reviewed} have employer pros/cons")
+          print("")
+          print("| Match | Title | Company | Posted |")
+          print("|---|---|---|---|")
+          for j in jobs[:10]:
+              print(f"| {j.get('match_pct')}% | {j.get('title')} | "
+                    f"{j.get('company')} | {j.get('posted') or '—'} |")
+          PY
+
+      - name: Upload the scan as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-latest
+          path: data/scout/latest.json
+          retention-days: 30
+
+      - name: Publish the feed to the ${{ env.FEED_BRANCH }} branch
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          PUB=$(mktemp -d)
+          cp data/scout/latest.json "$PUB/latest.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # The feed lives on its own branch, never on the default branch: a
+          # daily commit of generated JSON would otherwise churn the history
+          # every consumer of this repo has to read.
+          if git ls-remote --exit-code --heads origin "$FEED_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$FEED_BRANCH"
+            git checkout -B "$FEED_BRANCH" "origin/$FEED_BRANCH"
+          else
+            git checkout --orphan "$FEED_BRANCH"
+            git rm -rf --cached . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p scout/history
+          cp "$PUB/latest.json" scout/latest.json
+          cp "$PUB/latest.json" "scout/history/$STAMP.json"
+          git add scout/latest.json "scout/history/$STAMP.json"
+          # Nothing to commit is a legitimate outcome (a re-run within the same
+          # minute), not a failure.
+          git commit -m "chore(scout): scan $STAMP" || {
+            echo "::notice::feed unchanged; nothing committed"; exit 0;
+          }
+          git push origin "$FEED_BRANCH"
+
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${FEED_BRANCH}/scout/latest.json"
+          echo "Feed: $RAW" >> "$GITHUB_STEP_SUMMARY"

@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import type { ScoutJob, ScoutResult } from "@/app/api/scout/route";
+import { MatchFilters } from "@/components/MatchFilters";
+import { MatchTable } from "@/components/MatchTable";
 
 type Status = "idle" | "scanning" | "done" | "error";
 
@@ -10,6 +12,8 @@ export default function ScoutPage() {
   const [status, setStatus] = useState<Status>("idle");
   const [result, setResult] = useState<ScoutResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [days, setDays] = useState(30);
+  const [requireSalary, setRequireSalary] = useState(false);
 
   async function handleScan() {
     if (!file) return;
@@ -19,6 +23,8 @@ export default function ScoutPage() {
 
     const body = new FormData();
     body.append("cv", file);
+    body.append("days", String(days));
+    body.append("require_salary", requireSalary ? "true" : "false");
 
     try {
       const res = await fetch("/api/scout", { method: "POST", body });
@@ -67,6 +73,15 @@ export default function ScoutPage() {
           </button>
           {file && <span className="text-sm text-gray-500">{file.name}</span>}
         </div>
+
+        <MatchFilters
+          days={days}
+          onDaysChange={setDays}
+          requireSalary={requireSalary}
+          onRequireSalaryChange={setRequireSalary}
+          disabled={status === "scanning"}
+        />
+
         <p className="text-xs text-gray-400">
           Sources: karriere.at plus the free no-auth APIs (Arbeitnow, Remotive, Jobicy,
           Himalayas), and Adzuna/Jooble when their keys are configured. Scoring falls
@@ -121,97 +136,7 @@ function ScoutResults({ result }: { result: ScoutResult }) {
           {new Date(result.generated_at).toLocaleString()}
         </span>
       </div>
-      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Title
-              </th>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Company
-              </th>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Location
-              </th>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Match
-              </th>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500">
-                Why matched
-              </th>
-              <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500" />
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200">
-            {result.jobs.map((job, i) => (
-              <ScoutRow key={`${job.apply_url ?? job.title}-${i}`} job={job} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <MatchTable jobs={result.jobs} />
     </section>
-  );
-}
-
-/** Colour the match by how much of the candidate's stack the ad actually asks
- *  for, so a weak match reads as weak at a glance instead of as a blue badge
- *  indistinguishable from a strong one. */
-function matchTone(pct: number): string {
-  if (pct >= 50) return "bg-green-50 text-green-700";
-  if (pct >= 25) return "bg-amber-50 text-amber-700";
-  return "bg-gray-100 text-gray-500";
-}
-
-function ScoutRow({ job }: { job: ScoutJob }) {
-  const pct = job.match_pct;
-  const matched = job.matched_skills ?? [];
-  return (
-    <tr data-testid="scout-job-row">
-      <td className="px-4 py-2 text-sm text-gray-900">{job.title ?? "—"}</td>
-      <td className="px-4 py-2 text-sm text-gray-700">{job.company ?? "—"}</td>
-      <td className="px-4 py-2 text-sm text-gray-700">{job.location ?? "—"}</td>
-      <td className="px-4 py-2 text-sm">
-        <span
-          data-testid="scout-match-pct"
-          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${matchTone(pct ?? 0)}`}
-        >
-          {pct === null || pct === undefined ? "—" : `${pct}%`}
-        </span>
-      </td>
-      <td className="px-4 py-2 text-sm text-gray-500">
-        {matched.length ? (
-          <span data-testid="scout-matched-skills" className="flex flex-wrap gap-1">
-            {matched.slice(0, 6).map((s) => (
-              <span
-                key={s}
-                className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600"
-              >
-                {s}
-              </span>
-            ))}
-          </span>
-        ) : (
-          <span className="text-xs italic text-gray-400">
-            no skills from your CV appear in this ad
-          </span>
-        )}
-        {job.reason && <div className="mt-1 text-xs">{job.reason}</div>}
-      </td>
-      <td className="px-4 py-2 text-sm">
-        {job.apply_url ? (
-          <a
-            href={job.apply_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-blue-600 hover:underline"
-          >
-            Apply ↗
-          </a>
-        ) : (
-          "—"
-        )}
-      </td>
-    </tr>
   );
 }

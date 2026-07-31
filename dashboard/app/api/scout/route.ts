@@ -78,6 +78,26 @@ export interface ScoutJob {
   fit: number | null;
   reason: string | null;
   bucket: string | null;
+  /** Company pros/cons, attached only when the scan ran with review
+   *  enrichment on (`scout.py --company-reviews`). Model-generated, not
+   *  scraped from a review site — see CompanyReview.source. */
+  company_review?: CompanyReview | null;
+}
+
+export interface CompanyReview {
+  company: string;
+  pros: string[];
+  cons: string[];
+  summary: string;
+  source: string;
+  generated_at: string;
+}
+
+export interface ScoutFilters {
+  days: number;
+  top: number;
+  sources: string;
+  require_salary: boolean;
 }
 
 export interface ScoutResult {
@@ -86,6 +106,8 @@ export interface ScoutResult {
   profile_source: string | null;
   total_matches: number;
   jobs: ScoutJob[];
+  /** Present on API responses; absent in the raw scout.py file it wraps. */
+  filters?: ScoutFilters;
 }
 
 export async function POST(request: NextRequest) {
@@ -143,6 +165,12 @@ export async function POST(request: NextRequest) {
       "--json-out",
       jsonPath,
     ];
+    // Drops every ad that states no pay at all. Off by default because most
+    // Austrian listings omit salary entirely -- turning this on typically cuts
+    // the result set by more than half, which is a choice, not a default.
+    if (isTruthy(form.get("require_salary"))) {
+      args.push("--require-salary");
+    }
     // Keyword-lexicon scoring works with no key at all; only ask for an LLM
     // rerank when a key is actually configured, so the demo works out of the box.
     if (!process.env.NVIDIA_API_KEY) {
@@ -159,7 +187,19 @@ export async function POST(request: NextRequest) {
 
     const raw = await readFile(jsonPath, "utf-8");
     const result = JSON.parse(raw) as ScoutResult;
-    return NextResponse.json(result);
+    // Echo the filters back so the UI can state what the result set was
+    // narrowed by -- "12 matches" means something different with
+    // require_salary on, and the page shouldn't have to guess from its own
+    // form state what the server actually ran.
+    return NextResponse.json({
+      ...result,
+      filters: {
+        days,
+        top,
+        sources,
+        require_salary: isTruthy(form.get("require_salary")),
+      },
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
@@ -181,6 +221,11 @@ function runScout(args: string[]): Promise<{ code: number; stderr: string }> {
     child.on("error", reject);
     child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
   });
+}
+
+/** HTML checkboxes post "on"; JSON/fetch callers send "true" or "1". */
+function isTruthy(value: FormDataEntryValue | null): boolean {
+  return typeof value === "string" && ["on", "true", "1", "yes"].includes(value.toLowerCase());
 }
 
 function clampInt(

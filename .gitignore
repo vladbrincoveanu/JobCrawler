@@ -89,6 +89,11 @@ data/sent_jobs.json
 data/uploads/
 data/dashboard.html
 data/dashboards/
+# Scan output: produced by the scout-cron workflow (published to the
+# scout-data branch) or by a local scout.py run. Regenerable, and it carries
+# a specific person's match list.
+data/scout/
+data/company_reviews/
 logs/
 
 # Test build output (NEXT_DIST_DIR)

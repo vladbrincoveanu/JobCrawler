@@ -176,3 +176,97 @@ def test_missing_bucket_config_degrades_instead_of_crashing(tmp_path, monkeypatc
     rc = scout.main()
     assert rc == 0
     assert out_path.exists()
+
+
+def _fake_apis_factory(companies):
+    """Two ads at named companies, injected the way fetch_free_apis() would."""
+    def fake_apis(days, role_titles):
+        return [
+            {"url": f"https://x/{i}", "title": "Senior Backend Engineer",
+             "company": company, "ats_type": "arbeitnow",
+             "location": "Wien, Austria", "is_remote": "false", "country_iso": "AT",
+             "salary_min": None, "salary_max": None, "salary_currency": None,
+             "salary_period": None, "salary_summary": None, "employment_type": None,
+             "description": "Kafka, distributed systems", "posted": "2026-07-29",
+             "apply_url": f"https://x/{i}"}
+            for i, company in enumerate(companies)
+        ]
+    return fake_apis
+
+
+def _company_review_argv(cv_pdf, out_path, extra):
+    return ["scout.py", "--dry-run", "--cv", str(cv_pdf), "--sources", "apis",
+            "--json-out", str(out_path), *extra]
+
+
+def test_company_review_field_is_present_and_null_without_enrichment(
+        tmp_path, monkeypatch, cv_pdf):
+    """The dashboard reads job.company_review on every row. The key must exist
+    (as null) even when enrichment was never asked for, so a missing key can
+    never be mistaken for 'this company has no reviews'."""
+    monkeypatch.setattr(scout, "PROFILE_PATH", tmp_path / "data" / "profile.json")
+    monkeypatch.setattr(scout, "SENT_PATH", tmp_path / "data" / "sent_jobs.json")
+    monkeypatch.setattr(scout, "CV_DASHBOARD_DIR", tmp_path / "dashboards")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(scout, "extract_cv_text", lambda path: "Backend Engineer, Kafka")
+    monkeypatch.setattr(scout, "fetch_free_apis", _fake_apis_factory(["ACME GmbH"]))
+
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", _company_review_argv(cv_pdf, out_path, []))
+
+    assert scout.main() == 0
+    result = json.loads(out_path.read_text())
+    assert result["jobs"]
+    assert all(j["company_review"] is None for j in result["jobs"])
+
+
+def test_company_reviews_flag_without_api_key_does_not_fail_the_scan(
+        tmp_path, monkeypatch, cv_pdf):
+    """--company-reviews needs an LLM key. Without one the scan must still
+    produce its matches -- the enrichment is garnish, not a precondition."""
+    monkeypatch.setattr(scout, "PROFILE_PATH", tmp_path / "data" / "profile.json")
+    monkeypatch.setattr(scout, "SENT_PATH", tmp_path / "data" / "sent_jobs.json")
+    monkeypatch.setattr(scout, "CV_DASHBOARD_DIR", tmp_path / "dashboards")
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(scout, "extract_cv_text", lambda path: "Backend Engineer, Kafka")
+    monkeypatch.setattr(scout, "fetch_free_apis", _fake_apis_factory(["ACME GmbH"]))
+
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(
+        sys, "argv", _company_review_argv(cv_pdf, out_path, ["--company-reviews"]))
+
+    assert scout.main() == 0
+    result = json.loads(out_path.read_text())
+    assert result["jobs"]
+    assert all(j["company_review"] is None for j in result["jobs"])
+
+
+def test_company_reviews_are_attached_when_enrichment_runs(
+        tmp_path, monkeypatch, cv_pdf):
+    monkeypatch.setattr(scout, "PROFILE_PATH", tmp_path / "data" / "profile.json")
+    monkeypatch.setattr(scout, "SENT_PATH", tmp_path / "data" / "sent_jobs.json")
+    monkeypatch.setattr(scout, "CV_DASHBOARD_DIR", tmp_path / "dashboards")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(scout, "extract_cv_text", lambda path: "Backend Engineer, Kafka")
+    monkeypatch.setattr(scout, "fetch_free_apis", _fake_apis_factory(["ACME GmbH"]))
+    # The rerank is a separate LLM call; this test is about the reviews.
+    monkeypatch.setattr(scout, "llm_rerank", lambda *a, **k: None)
+    monkeypatch.setattr(
+        scout, "nvidia_chat",
+        lambda key, prompt, max_tokens: json.dumps(
+            {"known": True, "pros": ["good pay"], "cons": ["long hours"],
+             "summary": "solid"}))
+    # Cache into tmp_path, not the developer's real data/company_reviews/.
+    monkeypatch.setattr(scout.company_reviews_mod, "CACHE_DIR", tmp_path / "reviews")
+
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(
+        sys, "argv", _company_review_argv(cv_pdf, out_path, ["--company-reviews"]))
+
+    assert scout.main() == 0
+    result = json.loads(out_path.read_text())
+    review = result["jobs"][0]["company_review"]
+    assert review["pros"] == ["good pay"]
+    assert review["cons"] == ["long hours"]
+    # Provenance must survive into the payload the dashboard renders.
+    assert review["source"].startswith("llm:")

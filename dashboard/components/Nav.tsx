@@ -39,6 +39,13 @@ export function Nav() {
                 Runs
               </Link>
               <Link
+                href="/matches"
+                className="text-gray-700 hover:text-gray-900"
+                data-testid="nav-link-matches"
+              >
+                Matches
+              </Link>
+              <Link
                 href="/scout"
                 className="text-gray-700 hover:text-gray-900"
                 data-testid="nav-link-scout"

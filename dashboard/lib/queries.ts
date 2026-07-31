@@ -61,7 +61,11 @@ export async function getStats(): Promise<Stats> {
         "SELECT source, COUNT(*)::int AS n FROM jobs GROUP BY source"
       ),
       pool.query<RunRow>(
-        "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
+        // id DESC breaks ties on started_at. Without it two runs that begin
+        // inside the same clock tick -- which the seeder does, and which two
+        // sources crawled back-to-back do in production -- order arbitrarily,
+        // so the "Last run" card could show the earlier of the two.
+        "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT 1"
       ),
     ]);
   return {
@@ -138,7 +142,8 @@ export async function listSources(): Promise<string[]> {
 export async function listRuns(limit = 50): Promise<RunRow[]> {
   const pool = getPool();
   const res = await pool.query<RunRow>(
-    "SELECT * FROM runs ORDER BY started_at DESC LIMIT $1",
+    // Same tie-break as getStats(): equal timestamps must not shuffle the list.
+    "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT $1",
     [limit]
   );
   return res.rows;

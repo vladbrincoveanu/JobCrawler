@@ -14,6 +14,10 @@ import { defineConfig, devices } from "@playwright/test";
  */
 const PORT = Number(process.env.DASHBOARD_PORT ?? 3011);
 const BASE_URL = `http://127.0.0.1:${PORT}`;
+const FEED_FIXTURE = require("node:path").resolve(
+  __dirname,
+  "tests/fixtures/scout-feed.json",
+);
 const TEST_DATABASE_URL =
   process.env.DATABASE_URL ??
   "postgresql://jobcrawler:dev@localhost:5433/jobcrawler_test";
@@ -47,8 +51,13 @@ export default defineConfig({
     // existed -- on a clean checkout it just timed out waiting for a server that
     // could never boot. Building here also means a broken build fails the test
     // run instead of silently reusing a stale .next.
+    // SCOUT_FEED_PATH points /matches at a checked-in fixture scan instead of
+    // whatever data/scout/latest.json happens to hold on this machine -- the
+    // page must be asserted against a known feed, and a developer's real scan
+    // is neither known nor safe to overwrite.
     command:
       `npx next build && DATABASE_URL=${TEST_DATABASE_URL} ` +
+      `SCOUT_FEED_PATH=${FEED_FIXTURE} ` +
       `npx next start --port ${PORT}`,
     // Readiness is probed on /scout, NOT on "/". The overview page queries
     // PostgreSQL while rendering, and with no database running that request
