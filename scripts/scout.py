@@ -207,6 +207,26 @@ def load_profile(cv_path: Path, rebuild: bool) -> dict:
     return profile
 
 
+def load_profile_file(path: Path) -> dict:
+    """Load a pre-extracted profile, no PDF involved.
+
+    Scheduled runs have no CV: the PDF is never committed (the repository is
+    public) and is too large for an Actions secret (48KB cap, ~76KB base64).
+    They read the committed profile instead, which also saves the parse and the
+    LLM extraction call on every wake.
+
+    Validated rather than trusted: an empty profile scores every job 0, and the
+    run would then publish an empty board with no error anywhere.
+    """
+    profile = json.loads(path.read_text())
+    if not profile.get("skills"):
+        raise ValueError(f"{path} has no skills; nothing to match against")
+    if not profile.get("role_titles"):
+        raise ValueError(f"{path} has no role_titles; no board can be searched")
+    profile.setdefault("source", "file")
+    return profile
+
+
 # --------------------------------------------------------------------------- query
 
 def fetch_jobs(slices: list[str], countries: list[str], days: int,
@@ -819,6 +839,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cv", type=Path, default=DEFAULT_CV)
     parser.add_argument("--rebuild-profile", action="store_true",
                         help="re-extract the profile from the CV")
+    parser.add_argument("--profile", type=Path, default=None,
+                        help="use this already-extracted profile JSON instead of "
+                             "reading --cv; skips PDF parsing and LLM extraction "
+                             "entirely. This is what scheduled runs use -- the CV "
+                             "itself never leaves the local machine")
+    parser.add_argument("--profile-only", type=Path, default=None,
+                        help="extract a profile from this PDF, write it to the "
+                             "data/profiles/ cache, print the path, and exit "
+                             "without scanning anything")
     parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
     parser.add_argument("--no-apis", action="store_true",
                         help="skip live free APIs (arbeitnow, remotive, jobicy)")
@@ -893,7 +922,19 @@ def main() -> int:
         log(f"bucket config unavailable, continuing without CV buckets ({exc})")
         cv_buckets = []
 
-    profile = load_profile(args.cv, args.rebuild_profile)
+    if args.profile_only:
+        # Register-a-new-CV path: extract and stop. The dashboard then reads the
+        # printed path, checks it against the publish whitelist, and writes the
+        # sanitised copy into scout/. Adding a CV is a UI interaction, so it must
+        # not pay for a multi-minute scan.
+        load_profile(args.profile_only, args.rebuild_profile)
+        print(_profile_cache_path(args.profile_only))
+        return 0
+
+    if args.profile:
+        profile = load_profile_file(args.profile)
+    else:
+        profile = load_profile(args.cv, args.rebuild_profile)
     jobs: list[dict] = []
 
     if "jobhive" in sources:
@@ -992,7 +1033,10 @@ def main() -> int:
                 )
         result = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "cv": str(args.cv),
+            # What this run was actually matched against: the profile file for a
+            # scheduled run, the PDF for a local one. Naming --cv unconditionally
+            # printed a home-directory path that never existed on the runner.
+            "cv": str(args.profile or args.cv),
             "profile_source": profile.get("source"),
             "total_matches": len(jobs),
             "jobs": [
