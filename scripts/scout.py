@@ -1,0 +1,1135 @@
+#!/usr/bin/env python3
+"""CV-matched job scout: pull jobs from the jobhive ATS dataset, free remote-job
+APIs, karriere.at and StepStone.at, score them against a CV profile, and send the
+top matches as a Telegram message.
+
+Default run (dry):    python scripts/scout.py --dry-run
+Send to dev bot:      python scripts/scout.py
+Defaults: AT (Vienna boosted) + remote EU/global, no salary floor, top 5, never
+resends a job already delivered. Dashboard: data/dashboard.html
+(regenerated on every send — open it directly in a browser, no server needed).
+Tune:                 python scripts/scout.py --min-salary 70000 --countries AT,DE --days 7 --top 8 --remote eu
+
+Sources (--sources; the first four are the default):
+  jobhive    international ATS parquet slices (needs duckdb)
+  apis       arbeitnow / remotive / jobicy / himalayas — free, no key
+  karriere   karriere.at, Austria's largest board — Wien + Austria-wide remote
+  stepstone  StepStone.at — same coverage area, listing-only (detail pages are
+             WAF-blocked, so these rows carry a teaser instead of a full ad text
+             and almost never a salary)
+  adzuna     Adzuna aggregator — needs ADZUNA_APP_ID + ADZUNA_APP_KEY
+  jooble     Jooble aggregator — needs JOOBLE_API_KEY
+The last two are opt-in because they need a (free) key; naming one without its
+key set logs a skip and continues, so a keyless checkout still scans.
+
+CV buckets: every job is tagged with WHICH of the four CV variants to send,
+scored against the keyword files in career/Resume/JOB-SEARCH/keywords/ (the same
+files kwcount.py audits the CVs against). See data/buckets.json.
+  Only bucket C, karriere.at only:
+      python scripts/scout.py --dry-run --sources karriere --buckets C
+
+Note: there is no salary floor by default. Austrian ads commonly quote €45–70k
+gross, so any floor near €85k silently drops most AT rows that state a salary
+while letting through every row that states none. Opt in with --min-salary if
+you want one.
+
+Telegram credentials: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID env vars, or fallback
+to immo-scouter's config.json (--telegram dev|main selects the bot there).
+LLM re-ranking uses NVIDIA_API_KEY when present; otherwise keyword scoring only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import requests
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import buckets as buckets_mod
+import company_reviews as company_reviews_mod
+from sources import job_apis, karriere_at, stepstone_at
+
+JOBHIVE_BASE = "https://storage.stapply.ai/jobhive/v1"
+NVIDIA_MODEL = "meta/llama-3.3-70b-instruct"  # nemotron-70b returns 404 on this account
+DEFAULT_SLICES = ["eures", "personio", "recruitee", "greenhouse", "lever", "ashby",
+                  "join_com", "remoteok", "weworkremotely", "smartrecruiters",
+                  "teamtailor", "workable", "jobsch", "bundesagentur"]
+BIG_SLICES = ["workday", "successfactors"]  # huge (684k/290k rows) — opt in via --slices all
+API_UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) job-scout/1.0"}
+
+# Himalayas serves 20 rows a page regardless of `limit`.
+HIMALAYAS_PAGES = 5
+
+DEFAULT_CV = Path.home() / "Documents" / "Vlad_Brincoveanu_CV_2026.pdf"
+PROFILE_PATH = Path(__file__).resolve().parent.parent / "data" / "profile.json"
+SENT_PATH = Path(__file__).resolve().parent.parent / "data" / "sent_jobs.json"
+IMMO_CONFIG = Path.home() / "Desktop" / "Startup" / "immo-scouter" / "config.json"
+
+# Fallback skill lexicon for profile extraction without an LLM. Weights are
+# relative importance for scoring (title hits count 3x, description 1x).
+SKILL_LEXICON = {
+    r"\.net|dotnet": ("dotnet", 10), r"\bc#": ("csharp", 10),
+    r"asp\.net": ("aspnet", 8), r"\bazure\b": ("azure", 7),
+    r"\bkafka\b": ("kafka", 6),
+    # Helm charts are how you ship to Kubernetes, not a separate competence.
+    r"kubernetes|\bk8s\b|\bhelm\b": ("kubernetes", 6),
+    r"\bdocker\b": ("docker", 4), r"microservice": ("microservices", 6),
+    r"distributed system": ("distributed-systems", 7),
+    r"\bangular\b": ("angular", 5), r"typescript": ("typescript", 4),
+    r"\bpython\b": ("python", 5), r"\bsql\b|postgres|sql server": ("sql", 4),
+    r"\bllm\b|large language model|\bgen(erative)? ?ai\b|\brag\b": ("ai-llm", 8),
+    r"\baws\b": ("aws", 4), r"terraform": ("terraform", 3),
+    # Named CD/CI tools count as devops evidence rather than as separate skills:
+    # they are the same competence, and giving each its own entry would inflate
+    # the denominator in match_evidence() without adding discrimination.
+    r"\bci/cd\b|devops|argo\s?cd|argocd|teamcity|github actions|gitlab ci|jenkins":
+        ("devops", 4),
+    r"tech lead|team lead": ("lead", 6),
+    r"backend|back-end": ("backend", 6),
+    # Document stores are not interchangeable with the relational `sql` entry --
+    # an ad asking for MongoDB is not asking for PostgreSQL/SQL Server, and
+    # scoring them as one skill hid whichever the candidate actually had.
+    r"\bmongo(db)?\b": ("mongodb", 5),
+    # Event sourcing is a genuine differentiator: few ads ask for it, and the
+    # ones that do are a much stronger signal than another "microservices"
+    # mention. EventStoreDB, the pattern and CQRS are one competence here.
+    r"eventstore|event[\s-]?sourcing|\bcqrs\b|event[\s-]?driven": ("event-sourcing", 7),
+    r"e-?commerce|webshop|online[\s-]?shop": ("ecommerce", 3),
+    r"content management|\bcms\b|\becm\b": ("content-management", 3),
+}
+# Deliberately NOT in the lexicon: "REST API". It appears in almost every
+# backend ad, so as a scored skill it would add a near-constant to every job's
+# match and discriminate between none of them -- diluting the signal from the
+# skills that do separate a good ad from a bad one.
+
+ROLE_TITLES = [
+    ".net", "c#", "backend", "software engineer", "software developer",
+    "softwareentwickler", "software-entwickler", "full stack", "fullstack",
+    "tech lead", "platform engineer", "ai engineer",
+]
+
+# EURES uses NUTS region codes as locations; map the common DACH ones.
+NUTS_REGIONS = {
+    "AT11": "Burgenland", "AT12": "Lower Austria", "AT13": "Vienna",
+    "AT21": "Carinthia", "AT22": "Styria", "AT31": "Upper Austria",
+    "AT32": "Salzburg", "AT33": "Tyrol", "AT34": "Vorarlberg",
+}
+
+COUNTRY_LOCATION_PATTERNS = {
+    "AT": ["austria", "österreich", "wien", "vienna", "linz", "graz", "salzburg"],
+    "DE": ["germany", "deutschland", "berlin", "münchen", "munich", "hamburg", "frankfurt"],
+    "CH": ["switzerland", "schweiz", "zürich", "zurich", "basel", "geneva"],
+}
+
+
+def log(msg: str) -> None:
+    print(f"[scout] {msg}", file=sys.stderr)
+
+
+def nvidia_chat(api_key: str, prompt: str, max_tokens: int) -> str:
+    """One NVIDIA chat completion with a single retry on 5xx/timeouts."""
+    last_exc: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            resp = requests.post(
+                "https://integrate.api.nvidia.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": NVIDIA_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                },
+                timeout=90,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt == 1:
+                log(f"NVIDIA call failed ({exc}); retrying once")
+    raise last_exc  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- profile
+
+def extract_cv_text(cv_path: Path) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(cv_path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def build_profile_from_lexicon(cv_text: str) -> dict:
+    lower = cv_text.lower()
+    skills = {}
+    for pattern, (name, weight) in SKILL_LEXICON.items():
+        if re.search(pattern, lower):
+            skills[name] = weight
+    return {"skills": skills, "role_titles": ROLE_TITLES, "source": "lexicon"}
+
+
+def build_profile_with_llm(cv_text: str, api_key: str) -> dict | None:
+    prompt = (
+        "Extract a job-matching profile from this CV. Reply with ONLY JSON: "
+        '{"skills": {"<skill>": <weight 1-10>}, "role_titles": ["<job title keyword>", ...]}. '
+        "Max 20 skills, max 12 role title keywords (lowercase, substrings that would "
+        "appear in matching job titles, include German variants).\n\nCV:\n" + cv_text[:12000]
+    )
+    try:
+        text = nvidia_chat(api_key, prompt, max_tokens=800)
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        profile = json.loads(match.group(0)) if match else None
+        if profile and profile.get("skills"):
+            profile["source"] = "llm"
+            return profile
+    except Exception as exc:  # noqa: BLE001 - fall back to lexicon on any failure
+        log(f"LLM profile extraction failed ({exc}); using lexicon fallback")
+    return None
+
+
+def _profile_cache_path(cv_path: Path) -> Path:
+    """Cache key is the CV's own content hash, not a single shared file.
+
+    Previously every call reused data/profile.json regardless of which CV was
+    passed via --cv: the very first cached run "won" forever, silently reusing
+    a stale (or a *different person's*) profile for any later --cv. That's
+    fatal for the web CV-upload flow, where every upload should be scored
+    against its own content. Hashing the bytes also means uploading the same
+    CV twice for a quick re-scan is still cheap (no signature required for the
+    default personal CV to keep behaving exactly as before).
+    """
+    digest = hashlib.sha256(cv_path.read_bytes()).hexdigest()[:16]
+    return PROFILE_PATH.parent / "profiles" / f"{digest}.json"
+
+
+def load_profile(cv_path: Path, rebuild: bool) -> dict:
+    cache_path = _profile_cache_path(cv_path)
+    if cache_path.exists() and not rebuild:
+        return json.loads(cache_path.read_text())
+    log(f"building profile from {cv_path}")
+    cv_text = extract_cv_text(cv_path)
+    profile = None
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if api_key:
+        profile = build_profile_with_llm(cv_text, api_key)
+    if profile is None:
+        profile = build_profile_from_lexicon(cv_text)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(profile, indent=2))
+    log(f"profile saved ({profile['source']}): {len(profile['skills'])} skills")
+    return profile
+
+
+def load_profile_file(path: Path) -> dict:
+    """Load a pre-extracted profile, no PDF involved.
+
+    Scheduled runs have no CV: the PDF is never committed (the repository is
+    public) and is too large for an Actions secret (48KB cap, ~76KB base64).
+    They read the committed profile instead, which also saves the parse and the
+    LLM extraction call on every wake.
+
+    Validated rather than trusted: an empty profile scores every job 0, and the
+    run would then publish an empty board with no error anywhere.
+    """
+    profile = json.loads(path.read_text())
+    if not profile.get("skills"):
+        raise ValueError(f"{path} has no skills; nothing to match against")
+    if not profile.get("role_titles"):
+        raise ValueError(f"{path} has no role_titles; no board can be searched")
+    profile.setdefault("source", "file")
+    return profile
+
+
+# --------------------------------------------------------------------------- query
+
+def fetch_jobs(slices: list[str], countries: list[str], days: int,
+               role_titles: list[str], remote: str) -> list[dict]:
+    # Imported here, not at module scope: duckdb is only needed for the jobhive
+    # parquet slices, so `--sources karriere` runs without it installed.
+    import duckdb
+
+    urls = [f"{JOBHIVE_BASE}/{s}/jobs.parquet" for s in slices]
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+
+    loc_clauses = [f"country_iso = '{c}'" for c in countries]
+    for c in countries:
+        for pat in COUNTRY_LOCATION_PATTERNS.get(c, []):
+            loc_clauses.append(f"location ILIKE '%{pat}%'")
+    if remote == "eu":
+        loc_clauses.append("(is_remote ILIKE '%true%' AND (location ILIKE '%europe%' OR location ILIKE '%emea%' OR location ILIKE '%eu%'))")
+    elif remote == "global":
+        # any remote job not explicitly restricted to the Americas/APAC
+        loc_clauses.append(
+            "(is_remote ILIKE '%true%' AND NOT location ILIKE '%united states%'"
+            " AND NOT location ILIKE '%canada%' AND NOT location ILIKE '%latam%'"
+            " AND NOT location ILIKE '%apac%' AND NOT regexp_matches(location, ', ?[A-Z]{2}, US'))"
+        )
+    title_clauses = " OR ".join(f"title ILIKE '%{t}%'" for t in role_titles)
+
+    query = f"""
+        SELECT url, title, company, ats_type, location, is_remote, country_iso,
+               salary_min, salary_max, salary_currency, salary_period, salary_summary,
+               employment_type, description, posted_at[:10] AS posted, apply_url
+        FROM read_parquet({json.dumps(urls)})
+        WHERE ({' OR '.join(loc_clauses)})
+          AND NOT regexp_matches(location, ', ?VA\\b')      -- Vienna, Virginia
+          AND NOT location ILIKE '%united states%'
+          AND ({title_clauses})
+          AND posted_at >= '{cutoff}'
+    """
+    con = duckdb.connect()
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    rows = con.execute(query).fetchall()
+    cols = [d[0] for d in con.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def _api_get(url: str) -> dict | None:
+    try:
+        resp = requests.get(url, headers=API_UA, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:  # noqa: BLE001 - free APIs may flake; never block the run
+        log(f"API source failed, skipping: {url.split('/')[2]} ({exc})")
+        return None
+
+
+def _title_matches(title: str, role_titles: list[str]) -> bool:
+    lower = (title or "").lower()
+    return any(rt in lower for rt in role_titles)
+
+
+def fetch_free_apis(days: int, role_titles: list[str]) -> list[dict]:
+    """Live free job APIs, none of which need a key or an account.
+
+    Arbeitnow (DACH-focused), Remotive, Jobicy, RemoteOK and Himalayas (all
+    remote-first). The remote boards are worth having despite the Austrian
+    focus: reachable_from_home() keeps only the EU/worldwide ads, and those are
+    exactly the roles a Vienna-based candidate can take without relocating.
+
+    The Muse's public API was evaluated and deliberately left out -- its
+    unfiltered feed is dominated by US healthcare and retail postings over a
+    year old, which is noise this scorer would have to fight rather than signal.
+    """
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    jobs: list[dict] = []
+
+    def add(ats: str, title, company, location, is_remote, posted, url,
+            description="", salary_summary=None, salary_min=None,
+            salary_max=None, salary_currency=None):
+        if not _title_matches(title, role_titles) or (posted or "") < cutoff:
+            return
+        jobs.append({
+            "url": url, "title": title, "company": company, "ats_type": ats,
+            "location": location, "is_remote": str(is_remote).lower(),
+            "country_iso": None, "salary_min": salary_min, "salary_max": salary_max,
+            "salary_currency": salary_currency, "salary_period": "year",
+            "salary_summary": salary_summary, "employment_type": None,
+            "description": description, "posted": posted, "apply_url": url,
+        })
+
+    for page in (1, 2, 3):
+        data = _api_get(f"https://www.arbeitnow.com/api/job-board-api?page={page}")
+        if not data:
+            break
+        for j in data.get("data", []):
+            posted = date.fromtimestamp(j.get("created_at", 0)).isoformat()
+            add("arbeitnow", j.get("title"), j.get("company_name"), j.get("location"),
+                j.get("remote", False), posted, j.get("url"),
+                description=re.sub(r"<[^>]+>", " ", j.get("description") or "")[:6000])
+
+    data = _api_get("https://remotive.com/api/remote-jobs?limit=100")
+    for j in (data or {}).get("jobs", []):
+        add("remotive", j.get("title"), j.get("company_name"),
+            j.get("candidate_required_location") or "Remote", True,
+            (j.get("publication_date") or "")[:10], j.get("url"),
+            description=re.sub(r"<[^>]+>", " ", j.get("description") or "")[:6000],
+            salary_summary=j.get("salary") or None)
+
+    data = _api_get("https://jobicy.com/api/v2/remote-jobs?count=50")
+    for j in (data or {}).get("jobs", []):
+        add("jobicy", j.get("jobTitle"), j.get("companyName"),
+            j.get("jobGeo") or "Remote", True, (j.get("pubDate") or "")[:10],
+            j.get("url"), description=re.sub(r"<[^>]+>", " ", j.get("jobDescription")
+                                             or j.get("jobExcerpt") or "")[:6000],
+            salary_min=j.get("annualSalaryMin"), salary_max=j.get("annualSalaryMax"),
+            salary_currency=j.get("salaryCurrency"))
+
+    # Himalayas caps a page at 20 rows whatever `limit` says, so breadth comes
+    # from paging with `offset`.
+    for offset in range(0, HIMALAYAS_PAGES * 20, 20):
+        data = _api_get(f"https://himalayas.app/jobs/api?limit=20&offset={offset}")
+        rows = (data or {}).get("jobs", [])
+        if not rows:
+            break
+        for j in rows:
+            # pubDate is a unix epoch as a string; locationRestrictions is a
+            # list of countries, empty meaning worldwide.
+            try:
+                posted = date.fromtimestamp(int(j.get("pubDate") or 0)).isoformat()
+            except (ValueError, TypeError, OSError, OverflowError):
+                posted = ""
+            restrictions = j.get("locationRestrictions") or []
+            add("himalayas", j.get("title"), j.get("companyName"),
+                ", ".join(restrictions) if restrictions else "Worldwide", True,
+                posted, j.get("applicationLink"),
+                description=re.sub(r"<[^>]+>", " ",
+                                   j.get("description") or j.get("excerpt") or "")[:6000],
+                salary_min=j.get("minSalary"), salary_max=j.get("maxSalary"),
+                salary_currency=j.get("currency"))
+
+    log(f"{len(jobs)} rows from free APIs "
+        f"(arbeitnow/remotive/jobicy/himalayas)")
+    return jobs
+
+
+# Region restrictions that show up in titles rather than the location field.
+FOREIGN_REGION_RE = re.compile(
+    r"latam|apac|\bus only\b|\bu\.s\.\b|united states|canada|india|philippines", re.IGNORECASE)
+
+# A remote job is takeable from Austria only if its location is generic
+# ("Remote", "Worldwide") or Europe-flavored; "Remote - Brazil" means hiring there.
+GENERIC_REMOTE_RE = re.compile(r"^\s*(fully )?(remote|anywhere|worldwide|global)[\s!,.·-]*$",
+                               re.IGNORECASE)
+EU_HINT_RE = re.compile(
+    r"europe|emea|\beu\b|austria|österreich|wien|vienna|german|deutschland|switzerland|schweiz"
+    r"|netherlands|poland|spain|portugal|italy|france|belgium|denmark|sweden|finland"
+    r"|norway|czech|slovak|hungary|romania|bulgaria|croatia|slovenia|estonia|latvia|lithuania"
+    r"|greece|luxembourg", re.IGNORECASE)
+# UK/Ireland deliberately excluded from the generic EU hint: "remote, UK" or
+# "remote, Ireland" almost always means UK/IE work authorization required,
+# not free movement — the false positive that let "Zilch UK" through.
+UK_ONLY_RE = re.compile(r"\bu\.?k\.?\b|united kingdom|\bireland\b", re.IGNORECASE)
+
+
+def reachable_from_home(job: dict, countries: list[str]) -> bool:
+    loc = job["location"] or ""
+    if (job.get("country_iso") or "").upper() in countries:
+        return True
+    lower = loc.lower()
+    for c in countries:
+        if any(pat in lower for pat in COUNTRY_LOCATION_PATTERNS.get(c, [])):
+            return True
+    if "true" in (job.get("is_remote") or "").lower():
+        if UK_ONLY_RE.search(loc) and not EU_HINT_RE.search(loc.replace("uk", "")):
+            return False
+        return bool(GENERIC_REMOTE_RE.match(loc) or EU_HINT_RE.search(loc))
+    return False
+
+
+GENDER_MARKER_RE = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\)?", re.IGNORECASE)
+
+
+def normalize_title(title: str) -> str:
+    t = GENDER_MARKER_RE.sub(" ", (title or "").lower())
+    t = re.sub(r"[^a-z0-9äöüß]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def fingerprint(job: dict) -> str:
+    company = re.sub(r"\s+", " ", (job["company"] or "").strip().lower())
+    return hashlib.md5(f"{company}|{normalize_title(job['title'])}".encode()).hexdigest()
+
+
+def dedupe(jobs: list[dict]) -> list[dict]:
+    """Collapse multi-location repostings: one entry per company+title,
+    preferring an Austrian/Vienna variant, then the freshest posting."""
+    def rank(job: dict) -> tuple:
+        loc = (job["location"] or "").lower()
+        at = any(p in loc for p in COUNTRY_LOCATION_PATTERNS["AT"]) or loc.startswith("at ")
+        return (at, job["posted"] or "")
+
+    seen: dict[str, dict] = {}
+    for job in jobs:
+        fp = fingerprint(job)
+        prev = seen.get(fp)
+        if prev is None or rank(job) > rank(prev):
+            seen[fp] = job
+    return list(seen.values())
+
+
+def load_sent() -> dict:
+    if SENT_PATH.exists():
+        return json.loads(SENT_PATH.read_text())
+    return {}
+
+
+def save_sent(sent: dict) -> None:
+    SENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SENT_PATH.write_text(json.dumps(sent, indent=2, sort_keys=True))
+
+
+# --------------------------------------------------------------------------- scoring
+
+def annual_salary_eur(job: dict) -> int | None:
+    try:
+        raw = job.get("salary_max") or job.get("salary_min")
+        if not raw:
+            return None
+        value = float(re.sub(r"[^\d.]", "", str(raw)) or 0)
+        if value <= 0:
+            return None
+        period = (job.get("salary_period") or "").lower()
+        if "month" in period or (value < 15000 and "year" not in period):
+            value *= 12
+        elif "hour" in period:
+            value *= 1720
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def match_evidence(job: dict, profile: dict) -> tuple[int, list[str]]:
+    """How much of THIS candidate's stack the ad actually asks for.
+
+    Returns (0-100, matched skill names, strongest first).
+
+    This exists because `rank_score` is not a fit measure and was being read as
+    one. rank_score is a percentile: the best job in any result set scores ~100
+    even when nothing in that set fits, so a scan that surfaced only generic
+    DevOps ads for a .NET-first candidate still displayed "97". The percentage
+    here is absolute instead -- it is the share of the profile's own skill
+    weight that the ad mentions, so an ad matching only "kubernetes" and
+    "docker" for a profile built around .NET/C# scores low and *stays* low no
+    matter what it is ranked against.
+
+    Title hits count double, not triple as in score_job: this number answers
+    "how much overlap is there", where a skill named in the title is stronger
+    evidence but not three whole skills' worth.
+    """
+    title = (job.get("title") or "").lower()
+    desc = (job.get("description") or "").lower()[:6000]
+    skills = profile.get("skills") or {}
+    total_weight = sum(skills.values())
+    if not total_weight:
+        return 0, []
+
+    earned = 0.0
+    hits: list[tuple[float, str]] = []
+    for pattern, (name, _lex_weight) in SKILL_LEXICON.items():
+        weight = skills.get(name)
+        if not weight:
+            continue
+        if re.search(pattern, title):
+            earned += weight * 2
+            hits.append((weight * 2, name))
+        elif re.search(pattern, desc):
+            earned += weight
+            hits.append((weight, name))
+    pct = min(100, round(100 * earned / total_weight))
+    return pct, [name for _, name in sorted(hits, reverse=True)]
+
+
+def score_job(job: dict, profile: dict, exclude_terms: list[str],
+              extra_keywords: list[str]) -> float:
+    title = (job["title"] or "").lower()
+    desc = (job["description"] or "").lower()[:6000]
+    if any(term in title for term in exclude_terms):
+        return -1
+    if FOREIGN_REGION_RE.search(f"{title} {job['location'] or ''}"):
+        return -1
+    score = 0.0
+    for pattern, (name, weight) in SKILL_LEXICON.items():
+        if name not in profile["skills"]:
+            continue
+        w = profile["skills"][name]
+        if re.search(pattern, title):
+            score += w * 3
+        elif re.search(pattern, desc):
+            score += w
+    for kw in extra_keywords:
+        if kw in title:
+            score += 15
+        elif kw in desc:
+            score += 5
+    if any(rt in title for rt in profile["role_titles"]):
+        score += 10
+    location = (job["location"] or "").lower()
+    if "wien" in location or "vienna" in location or "at13" in location:
+        score += 8  # Vienna preferred
+    posted = job.get("posted") or ""
+    if posted >= (date.today() - timedelta(days=3)).isoformat():
+        score += 8
+    elif posted >= (date.today() - timedelta(days=7)).isoformat():
+        score += 4
+    if annual_salary_eur(job):
+        score += 5  # transparent salary is a plus
+    return score
+
+
+def llm_rerank(jobs: list[dict], profile: dict, api_key: str) -> None:
+    """Ask the LLM for a 0-100 fit score + one-line reason for each top job.
+    Mutates jobs in place; silently keeps keyword scores on failure."""
+    summary = "\n".join(
+        f"{i}. {j['title']} @ {j['company']} ({j['location']}) :: {(j['description'] or '')[:300]}"
+        for i, j in enumerate(jobs)
+    )
+    prompt = (
+        "Candidate skills: " + ", ".join(profile["skills"]) +
+        ". Target roles: " + ", ".join(profile["role_titles"][:6]) +
+        '.\nScore each job 0-100 for fit and give a short reason. Reply ONLY JSON: '
+        '[{"i": <index>, "fit": <0-100>, "reason": "<max 12 words>"}]\n\nJobs:\n' + summary
+    )
+    try:
+        text = nvidia_chat(api_key, prompt, max_tokens=1500)
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        for entry in json.loads(match.group(0)):
+            idx = entry.get("i")
+            if isinstance(idx, int) and 0 <= idx < len(jobs):
+                jobs[idx]["fit"] = entry.get("fit")
+                jobs[idx]["reason"] = entry.get("reason")
+        jobs.sort(key=lambda j: j.get("fit") or 0, reverse=True)
+        log("LLM rerank applied")
+    except Exception as exc:  # noqa: BLE001
+        log(f"LLM rerank skipped ({exc})")
+
+
+# --------------------------------------------------------------------------- telegram
+
+DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "data" / "dashboard.html"
+CV_DASHBOARD_DIR = Path(__file__).resolve().parent.parent / "data" / "dashboards"
+
+
+def generate_dashboard(sent: dict) -> None:
+    """Simplest possible dashboard: one static HTML file, no server.
+    Open data/dashboard.html directly in a browser."""
+    def esc(text) -> str:
+        return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    def row(rec) -> str:
+        if not isinstance(rec, dict):  # legacy entries from before the dashboard existed
+            return f"<tr><td>{esc(rec)}</td><td colspan=9>(sent before dashboard tracking started)</td></tr>"
+        link = f'<a href="{esc(rec["apply_url"])}" target="_blank">apply</a>' if rec.get("apply_url") else ""
+        salary = f"€{rec['salary']:,}" if isinstance(rec.get("salary"), int) else esc(rec.get("salary"))
+        bucket = esc(rec.get("bucket"))
+        if bucket and rec.get("bucket_fit") != "":
+            bucket = f"{bucket} <span class=dim>{esc(rec.get('bucket_fit'))}%</span>"
+        return (f"<tr><td>{esc(rec.get('sent_date'))}</td><td>{esc(rec.get('title'))}</td>"
+                f"<td>{esc(rec.get('company'))}</td><td>{esc(rec.get('location'))}</td>"
+                f"<td>{salary}</td><td>{bucket}</td><td>{esc(rec.get('source'))}</td>"
+                f"<td>{esc(rec.get('fit'))}</td>"
+                f"<td>{esc(rec.get('posted'))}</td><td>{link}</td></tr>")
+
+    ordered = sorted(sent.items(),
+                     key=lambda kv: kv[1].get("sent_date", "") if isinstance(kv[1], dict) else str(kv[1]),
+                     reverse=True)
+    rows_html = "\n".join(row(rec) for _, rec in ordered)
+    html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Job Scout — sent history</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d10;color:#e6e6e6;padding:24px}}
+h1{{font-size:18px;margin:0 0 4px}} .meta{{color:#888;margin-bottom:16px;font-size:13px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{padding:6px 10px;border-bottom:1px solid #222;text-align:left;vertical-align:top}}
+th{{color:#9ab;position:sticky;top:0;background:#0b0d10}}
+tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
+.dim{{color:#888}}
+</style></head><body>
+<h1>Job Scout — sent history</h1>
+<div class="meta">{len(sent)} jobs ever sent · generated {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+<table><thead><tr><th>Sent</th><th>Title</th><th>Company</th><th>Location</th>
+<th>Salary</th><th>CV</th><th>Source</th><th>Fit</th><th>Posted</th><th></th></tr></thead>
+<tbody>{rows_html}</tbody></table>
+</body></html>"""
+    DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DASHBOARD_PATH.write_text(html)
+    log(f"dashboard: file://{DASHBOARD_PATH}")
+
+
+def rank_jobs(jobs: list[dict]) -> list[dict]:
+    """Order jobs newest-posted-first and attach a 0-100 rank score.
+
+    Two orderings are in play and they are deliberately different. The LIST is
+    ordered by posting date, because a dashboard you check daily is useless if
+    last week's ad sits on top. The SCORE is the job's rank by match quality
+    within its own CV bucket, rescaled to 0-100 -- so the number answers "how
+    does this compare to the other jobs this CV can go for", not "what did the
+    keyword scorer happen to total". A bucket of 3 jobs and a bucket of 300 are
+    then readable on the same scale.
+
+    Jobs with no parseable posting date sort last: unknown is not fresh.
+    """
+    by_quality = sorted(jobs, key=lambda j: j.get("score", 0), reverse=True)
+    total = len(by_quality)
+    for position, job in enumerate(by_quality):
+        job["rank"] = position + 1
+        # Best job in the bucket scores 100; worst scores 100/total, never 0,
+        # because being last of many is not the same as being unmatched.
+        job["rank_score"] = round(100 * (total - position) / total) if total else 0
+    return sorted(by_quality,
+                  key=lambda j: (j.get("posted") or "", -j.get("rank", 0)),
+                  reverse=True)
+
+
+def _dashboard_page(title: str, subtitle: str, jobs: list[dict], nav: str) -> str:
+    def esc(text) -> str:
+        return (str(text or "").replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    def row(job: dict) -> str:
+        salary = annual_salary_eur(job)
+        salary_cell = f"€{salary:,}" if salary else '<span class=dim>—</span>'
+        link = (f'<a href="{esc(job.get("apply_url") or job.get("url"))}" target="_blank">apply ↗</a>'
+                if (job.get("apply_url") or job.get("url")) else "")
+        remote = ' <span class="tag">remote</span>' if (job.get("is_remote") or "").lower() == "true" else ""
+        return (f'<tr><td class=mono>{esc(job.get("posted") or "?")}</td>'
+                f'<td>{esc(job.get("title"))}{remote}</td>'
+                f'<td>{esc(job.get("company"))}</td>'
+                f'<td>{esc(job.get("location"))}</td>'
+                f'<td>{salary_cell}</td>'
+                f'<td class=mono>{esc(job.get("source") or job.get("ats_type"))}</td>'
+                f'<td class=mono>#{job.get("rank", "?")}</td>'
+                f'<td class=mono><b>{job.get("rank_score", 0)}</b></td>'
+                f'<td>{link}</td></tr>')
+
+    rows = "\n".join(row(j) for j in jobs) or \
+        '<tr><td colspan=9 class=dim>no jobs matched this CV in the last run</td></tr>'
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{esc(title)}</title>
+<style>
+body{{font-family:-apple-system,Segoe UI,sans-serif;background:#0b0d10;color:#e6e6e6;padding:24px}}
+h1{{font-size:18px;margin:0 0 4px}} .meta{{color:#888;margin-bottom:16px;font-size:13px}}
+nav{{margin:0 0 18px;font-size:13px}} nav a{{margin-right:14px}}
+nav a.on{{color:#e6e6e6;font-weight:600;border-bottom:2px solid #7dc4ff}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{padding:6px 10px;border-bottom:1px solid #222;text-align:left;vertical-align:top}}
+th{{color:#9ab;position:sticky;top:0;background:#0b0d10}}
+tr:hover{{background:#151a20}} a{{color:#7dc4ff;text-decoration:none}}
+.dim{{color:#888}} .mono{{font-variant-numeric:tabular-nums;color:#9ab}}
+.tag{{font-size:11px;color:#7dc4ff;border:1px solid #2a3a4a;border-radius:3px;padding:0 4px}}
+</style></head><body>
+<h1>{esc(title)}</h1>
+<div class="meta">{esc(subtitle)}</div>
+<nav>{nav}</nav>
+<table><thead><tr><th>Posted</th><th>Title</th><th>Company</th><th>Location</th>
+<th>Salary</th><th>Source</th><th>Rank</th><th>Score</th><th></th></tr></thead>
+<tbody>{rows}</tbody></table>
+</body></html>"""
+
+
+def generate_cv_dashboards(jobs: list[dict], cv_buckets: list, args) -> None:
+    """One dashboard per CV variant, listing every job that CV can go for.
+
+    These show ALL available matches from this run, not just the handful sent to
+    Telegram -- the Telegram message is a daily digest, these are the backlog you
+    actually work through. data/dashboard.html (sent history) stays as it was.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    by_bucket = {bucket.id: [] for bucket in cv_buckets}
+    for job in jobs:
+        if job.get("bucket") in by_bucket:
+            by_bucket[job["bucket"]].append(job)
+
+    pages = [("index", "All CVs", None)] + \
+        [(f"cv-{b.id}", f"{b.id} — {b.label}", b) for b in cv_buckets]
+
+    def nav_for(current: str) -> str:
+        return "".join(
+            f'<a class="{"on" if slug == current else ""}" href="{slug}.html">'
+            f'{label.replace("&", "&amp;")}</a>'
+            for slug, label, _ in pages)
+
+    CV_DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
+    for bucket in cv_buckets:
+        ranked = rank_jobs(list(by_bucket[bucket.id]))
+        subtitle = (f"{len(ranked)} available jobs · CV: {bucket.cv} · "
+                    f"newest first · score = rank within this CV · generated {stamp}")
+        (CV_DASHBOARD_DIR / f"cv-{bucket.id}.html").write_text(
+            _dashboard_page(f"{bucket.id} — {bucket.label}", subtitle, ranked,
+                            nav_for(f"cv-{bucket.id}")), encoding="utf-8")
+
+    # The index ranks every job against every other, regardless of CV, so the
+    # per-CV pages stay the place where the score means "best fit for this CV".
+    # With no buckets configured (e.g. the single-CV web-upload flow), every
+    # scored job belongs on the index -- there's no per-bucket filter to apply.
+    everything = rank_jobs([j for j in jobs if not cv_buckets or j.get("bucket") in by_bucket])
+    counts = ", ".join(f"{b.id}: {len(by_bucket[b.id])}" for b in cv_buckets)
+    subtitle = (f"{len(everything)} available jobs across {len(cv_buckets)} CVs "
+                f"({counts}) · last {args.days}d · newest first · generated {stamp}")
+    (CV_DASHBOARD_DIR / "index.html").write_text(
+        _dashboard_page("Job Scout — all CVs", subtitle, everything, nav_for("index")),
+        encoding="utf-8")
+    log(f"CV dashboards: file://{CV_DASHBOARD_DIR / 'index.html'}")
+
+
+def resolve_telegram(target: str, config_path: Path) -> tuple[str, str]:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if token and chat_id:
+        return token, chat_id
+    config = json.loads(config_path.read_text())
+    bot = config["telegram"][f"telegram_{target}"]
+    return bot["bot_token"], str(bot["chat_id"])
+
+
+def esc(text: str) -> str:
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_message(jobs: list[dict], args: argparse.Namespace) -> str:
+    lines = [
+        f"<b>🎯 Job Scout — top {len(jobs)} CV matches</b>",
+        f"<i>{', '.join(args.countries)}"
+        + (f" + remote-{args.remote}" if args.remote != "off" else "")
+        + f" · last {args.days}d"
+        + (f" · min €{args.min_salary:,}" if args.min_salary else "") + "</i>",
+        "",
+    ]
+    for i, job in enumerate(jobs, 1):
+        company = job["company"] or ""
+        if not company or "siehe beschreibung" in company.lower():
+            company = "(EURES ad — company in description)"
+        salary = annual_salary_eur(job)
+        location = job["location"] or "?"
+        nuts = re.fullmatch(r"([A-Z]{2}) \((AT\d{3})\)", location)
+        if nuts:
+            location = NUTS_REGIONS.get(nuts.group(2)[:4], nuts.group(1)) + ", AT"
+        parts = [f"<b>{i}. {esc(job['title'])}</b>"]
+        meta = f"{esc(company)} · {esc(location)} · {job['posted'] or '?'}"
+        if salary:
+            meta += f" · ~€{salary:,}/yr"
+        if job.get("fit") is not None:
+            meta += f" · fit {job['fit']}/100"
+        parts.append(meta)
+        if job.get("bucket"):
+            parts.append(f"📄 send <b>{esc(job['bucket'])}</b> — "
+                         f"{esc(job['bucket_label'])} ({job['bucket_fit']}%)")
+        if job.get("reason"):
+            parts.append(f"<i>{esc(job['reason'])}</i>")
+        link = job.get("apply_url") or job.get("url")
+        if link:
+            parts.append(f'<a href="{esc(link)}">Apply ↗</a>')
+        lines.append("\n".join(parts))
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def send_telegram(token: str, chat_id: str, message: str) -> None:
+    # Telegram caps messages at 4096 chars; split on job boundaries.
+    chunks, current = [], ""
+    for block in message.split("\n\n"):
+        if len(current) + len(block) + 2 > 4000:
+            chunks.append(current)
+            current = block
+        else:
+            current = f"{current}\n\n{block}" if current else block
+    chunks.append(current)
+    for chunk in chunks:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML",
+                  "disable_web_page_preview": True},
+            timeout=30,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"Telegram send failed: {resp.status_code} {resp.text[:200]}")
+    log(f"sent {len(chunks)} Telegram message(s)")
+
+
+# --------------------------------------------------------------------------- main
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--countries", default="AT",
+                        help="comma-separated ISO codes: AT,DE,CH (default AT)")
+    parser.add_argument("--min-salary", type=int, default=0,
+                        help="min annual EUR (default 0 = no floor); jobs with a LOWER "
+                             "parsed salary are dropped (jobs without salary info are "
+                             "kept unless --require-salary)")
+    parser.add_argument("--require-salary", action="store_true",
+                        help="drop jobs with no parseable salary")
+    parser.add_argument("--days", type=int, default=14, help="recency window (default 14)")
+    parser.add_argument("--top", type=int, default=5, help="number of jobs in the message (default 5)")
+    parser.add_argument("--slices", default=",".join(DEFAULT_SLICES),
+                        help=f"jobhive slices; 'all' adds {','.join(BIG_SLICES)}")
+    parser.add_argument("--keywords", default="", help="comma-separated boost terms")
+    parser.add_argument("--exclude", default="intern,praktik,werkstudent,student",
+                        help="comma-separated title terms to drop")
+    parser.add_argument("--remote", choices=["off", "eu", "global"], default="global",
+                        help="include remote jobs: off, eu-only, or global (default global; "
+                             "global drops US/Canada/LATAM/APAC-restricted ads)")
+    parser.add_argument("--cv", type=Path, default=DEFAULT_CV)
+    parser.add_argument("--rebuild-profile", action="store_true",
+                        help="re-extract the profile from the CV")
+    parser.add_argument("--profile", type=Path, default=None,
+                        help="use this already-extracted profile JSON instead of "
+                             "reading --cv; skips PDF parsing and LLM extraction "
+                             "entirely. This is what scheduled runs use -- the CV "
+                             "itself never leaves the local machine")
+    parser.add_argument("--profile-only", type=Path, default=None,
+                        help="extract a profile from this PDF, write it to the "
+                             "data/profiles/ cache, print the path, and exit "
+                             "without scanning anything")
+    parser.add_argument("--no-llm", action="store_true", help="skip LLM rerank")
+    parser.add_argument("--no-apis", action="store_true",
+                        help="skip live free APIs (arbeitnow, remotive, jobicy)")
+    parser.add_argument("--sources", default="jobhive,apis,karriere,stepstone",
+                        help="comma-separated: jobhive, apis, karriere, stepstone, "
+                             "adzuna, jooble. adzuna and jooble need API keys so "
+                             "they are off by default; naming them without the "
+                             "key set is a logged skip, not an error")
+    parser.add_argument("--jooble-locations", default="Wien,",
+                        help="Jooble location strings; an empty entry means "
+                             "country-wide (default 'Wien,')")
+    parser.add_argument("--buckets", default="",
+                        help="restrict CV variants, e.g. A,C (default: all in "
+                             "data/buckets.json)")
+    parser.add_argument("--karriere-locations", default="wien,",
+                        help="karriere.at location slugs; an empty entry means "
+                             "Austria-wide, which is how remote ads are reached "
+                             "(default 'wien,' = Wien + Austria-wide)")
+    parser.add_argument("--karriere-max-detail", type=int, default=60,
+                        help="max karriere.at detail pages to fetch for "
+                             "descriptions/salary (default 60)")
+    parser.add_argument("--stepstone-locations", default="wien,",
+                        help="StepStone.at location slugs; an empty entry means "
+                             "Austria-wide, which is how remote ads are reached "
+                             "(default 'wien,' = Wien + Austria-wide)")
+    parser.add_argument("--stepstone-pages", type=int, default=3,
+                        help="max StepStone.at result pages per search term "
+                             "(25 ads a page; default 3)")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="don't skip jobs already sent in a previous run")
+    parser.add_argument("--reset-sent", action="store_true",
+                        help="clear the sent-jobs history before this run")
+    parser.add_argument("--telegram", choices=["dev", "main"], default="dev",
+                        help="which immo-scouter bot to use (default dev)")
+    parser.add_argument("--telegram-config", type=Path, default=IMMO_CONFIG)
+    parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
+    parser.add_argument("--company-reviews", action="store_true",
+                        help="attach model-generated employer pros/cons to each match "
+                             "(needs NVIDIA_API_KEY; results are cached in "
+                             "data/company_reviews/ and are NOT scraped from Glassdoor "
+                             "or any review site -- see scripts/company_reviews.py)")
+    parser.add_argument("--company-review-limit", type=int, default=20,
+                        help="max distinct companies to look up per run (default 20)")
+    parser.add_argument("--json-out", type=Path, default=None,
+                        help="write the full ranked/scored match list as JSON to this "
+                             "path instead of sending Telegram or printing a digest "
+                             "(for programmatic callers, e.g. the dashboard's CV-upload "
+                             "flow); implies --dry-run and skips the sent-jobs history")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    args.countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
+    exclude_terms = [t.strip().lower() for t in args.exclude.split(",") if t.strip()]
+    extra_keywords = [k.strip().lower() for k in args.keywords.split(",") if k.strip()]
+    slices = DEFAULT_SLICES + BIG_SLICES if args.slices == "all" else \
+        [s.strip() for s in args.slices.split(",") if s.strip()]
+
+    sources = {s.strip().lower() for s in args.sources.split(",") if s.strip()}
+    bucket_filter = [b.strip().upper() for b in args.buckets.split(",") if b.strip()]
+    try:
+        cv_buckets = buckets_mod.load_buckets(only=bucket_filter or None)
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        # The bucket system (data/buckets.json + career/Resume/JOB-SEARCH/keywords/)
+        # is a personal, machine-local setup -- it points at CV keyword files that
+        # live outside this repo. A fresh checkout (or the web CV-upload flow,
+        # which scores a single ad-hoc CV rather than a fixed set of variants)
+        # has none of that, and previously this crashed the whole run. Degrade to
+        # "no bucket annotations" instead: scoring/matching against --cv still
+        # works, jobs just aren't tagged with a "send this CV variant" label.
+        log(f"bucket config unavailable, continuing without CV buckets ({exc})")
+        cv_buckets = []
+
+    if args.profile_only:
+        # Register-a-new-CV path: extract and stop. The dashboard then reads the
+        # printed path, checks it against the publish whitelist, and writes the
+        # sanitised copy into scout/. Adding a CV is a UI interaction, so it must
+        # not pay for a multi-minute scan.
+        load_profile(args.profile_only, args.rebuild_profile)
+        print(_profile_cache_path(args.profile_only))
+        return 0
+
+    if args.profile:
+        profile = load_profile_file(args.profile)
+    else:
+        profile = load_profile(args.cv, args.rebuild_profile)
+    jobs: list[dict] = []
+
+    if "jobhive" in sources:
+        log(f"querying {len(slices)} slices for {args.countries}, last {args.days}d …")
+        jobs += fetch_jobs(slices, args.countries, args.days,
+                           profile["role_titles"], args.remote)
+        log(f"{len(jobs)} raw rows from jobhive")
+    if "apis" in sources and not args.no_apis:
+        jobs += fetch_free_apis(args.days, profile["role_titles"])
+    # Board searches are driven by the CV buckets' search terms. With no bucket
+    # config -- a fresh checkout, or the web CV-upload flow scoring one ad-hoc CV
+    # -- that list is empty, and karriere/stepstone were then searched for
+    # nothing and silently returned zero rows. The uploaded CV's own role titles
+    # are the right stand-in: they are what the profile says this person is.
+    search_terms = buckets_mod.all_search_terms(cv_buckets) or profile["role_titles"]
+    if "karriere" in sources:
+        # Locations are split without dropping empties: a trailing comma in
+        # "wien," is the deliberate Austria-wide arm, not a typo.
+        locations = [loc.strip() for loc in args.karriere_locations.split(",")]
+        jobs += karriere_at.fetch(
+            search_terms, locations,
+            days=args.days, max_detail=args.karriere_max_detail)
+    if "stepstone" in sources:
+        # Same trailing-comma convention as --karriere-locations: the empty entry
+        # is the deliberate Austria-wide arm, not a typo.
+        locations = [loc.strip() for loc in args.stepstone_locations.split(",")]
+        jobs += stepstone_at.fetch(
+            search_terms, locations,
+            days=args.days, max_pages=args.stepstone_pages)
+    if "adzuna" in sources:
+        jobs += job_apis.fetch_adzuna(search_terms, args.countries, args.days)
+    if "jooble" in sources:
+        locations = [loc.strip() for loc in args.jooble_locations.split(",")]
+        jobs += job_apis.fetch_jooble(search_terms, locations, args.days)
+    if args.remote != "off":
+        jobs = [j for j in jobs if reachable_from_home(j, args.countries)]
+        log(f"{len(jobs)} after remote-reachability filter")
+    jobs = dedupe(jobs)
+
+    if args.min_salary or args.require_salary:
+        kept = []
+        for job in jobs:
+            salary = annual_salary_eur(job)
+            if salary is None:
+                if not args.require_salary:
+                    kept.append(job)
+            elif salary >= args.min_salary:
+                kept.append(job)
+        jobs = kept
+
+    buckets_mod.annotate(jobs, cv_buckets)
+    for job in jobs:
+        job["score"] = score_job(job, profile, exclude_terms, extra_keywords)
+    jobs = sorted((j for j in jobs if j["score"] > 0), key=lambda j: j["score"], reverse=True)
+    log(f"{len(jobs)} jobs after dedupe/filter/score")
+
+    # Built from the full scored set, BEFORE the already-sent filter and the
+    # --top cut: the dashboards are the backlog, the Telegram message is the
+    # daily digest off the top of it.
+    if not args.json_out:
+        generate_cv_dashboards(jobs, cv_buckets, args)
+
+    if args.json_out:
+        # Structured, one-shot output for programmatic callers (the dashboard's
+        # CV-upload-and-scan flow). Deliberately ignores the sent-jobs history --
+        # that mechanism exists so the Telegram digest never repeats itself, but
+        # "scan right now" should show every current match, seen before or not.
+        # rank_jobs attaches rank/rank_score and then returns the list ordered
+        # NEWEST-POSTED-FIRST, which is right for the backlog dashboards it was
+        # written for and wrong here: slicing [:limit] off a date-ordered list
+        # returned the most recent N ads, not the best-matching N, so a strong
+        # older match was silently dropped in favour of a fresh weak one. Take
+        # the top N by match quality, and present them that way.
+        ranked = sorted(rank_jobs(list(jobs)),
+                        key=lambda j: j.get("score", 0), reverse=True)
+        limit = max(args.top, 20) if args.top else len(ranked)
+        output_jobs = ranked[:limit]
+        api_key = os.environ.get("NVIDIA_API_KEY")
+        if api_key and not args.no_llm and output_jobs:
+            llm_rerank(output_jobs, profile, api_key)
+        for job in output_jobs:
+            job["match_pct"], job["matched_skills"] = match_evidence(job, profile)
+        # Enrichment last, and only over the jobs that survived the --top cut:
+        # it costs one LLM call per unseen company, so paying for companies
+        # that never reach the output would be waste.
+        if args.company_reviews and output_jobs:
+            if not api_key:
+                log("--company-reviews needs NVIDIA_API_KEY; skipping enrichment")
+            else:
+                company_reviews_mod.annotate(
+                    output_jobs,
+                    lambda prompt: nvidia_chat(api_key, prompt, max_tokens=500),
+                    NVIDIA_MODEL,
+                    limit=args.company_review_limit,
+                    log=log,
+                )
+        result = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            # What this run was actually matched against: the profile file for a
+            # scheduled run, the PDF for a local one. Naming --cv unconditionally
+            # printed a home-directory path that never existed on the runner.
+            "cv": str(args.profile or args.cv),
+            "profile_source": profile.get("source"),
+            "total_matches": len(jobs),
+            "jobs": [
+                {
+                    "title": j.get("title"),
+                    "company": j.get("company"),
+                    "location": j.get("location"),
+                    "posted": j.get("posted"),
+                    "salary": annual_salary_eur(j) or j.get("salary_summary"),
+                    "source": j.get("ats_type"),
+                    "apply_url": j.get("apply_url") or j.get("url"),
+                    "score": j.get("score"),
+                    "rank": j.get("rank"),
+                    "rank_score": j.get("rank_score"),
+                    # The honest fit number and the evidence behind it. Read
+                    # match_pct, not rank_score: see match_evidence().
+                    "match_pct": j.get("match_pct"),
+                    "matched_skills": j.get("matched_skills") or [],
+                    "profile_skills": sorted((profile.get("skills") or {}),
+                                             key=lambda s: -profile["skills"][s]),
+                    "fit": j.get("fit"),
+                    "reason": j.get("reason"),
+                    "bucket": j.get("bucket"),
+                    "company_review": j.get("company_review"),
+                }
+                for j in output_jobs
+            ],
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(result, indent=2))
+        log(f"wrote {len(output_jobs)} matches to {args.json_out}")
+        return 0
+
+    sent = {} if args.reset_sent else load_sent()
+    if not args.no_dedup:
+        before = len(jobs)
+        jobs = [j for j in jobs if fingerprint(j) not in sent]
+        log(f"{len(jobs)} new (skipped {before - len(jobs)} already sent)")
+
+    rerank_pool = max(args.top * 4, 20)
+    jobs = jobs[:rerank_pool]
+    if not jobs:
+        log("no new matches since last run — nothing to send")
+        return 0
+
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if api_key and not args.no_llm:
+        llm_rerank(jobs, profile, api_key)
+    jobs = jobs[: args.top]
+
+    message = format_message(jobs, args)
+    if args.dry_run:
+        print(message)
+        return 0
+    token, chat_id = resolve_telegram(args.telegram, args.telegram_config)
+    send_telegram(token, chat_id, message)
+    today = date.today().isoformat()
+    for job in jobs:
+        sent[fingerprint(job)] = {
+            "sent_date": today, "title": job["title"],
+            "company": ("(EURES — see ad)" if (job["company"] or "").lower().startswith("siehe")
+                       else job["company"]),
+            "location": job.get("location") or "", "posted": job.get("posted") or "",
+            "salary": annual_salary_eur(job) or job.get("salary_summary") or "",
+            "fit": job.get("fit", ""), "apply_url": job.get("apply_url") or job.get("url") or "",
+            "source": job.get("ats_type") or "",
+            "bucket": job.get("bucket") or "", "bucket_fit": job.get("bucket_fit", ""),
+        }
+    save_sent(sent)
+    generate_dashboard(sent)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

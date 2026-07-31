@@ -2,16 +2,18 @@
 tests use FakeBrowserContext (DI). Spec § AMS adapter."""
 import asyncio
 import random
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from urllib.parse import urlparse
-from typing import AsyncIterator
+
 from bs4 import BeautifulSoup
+
 from crawler import config
 from crawler.browser import BrowserContext
-from crawler.models import JobQuery, RawJob, NormalizedJob
-from crawler.parser import select_text, parse_iso_date
-from crawler.storage.dedup import content_hash
 from crawler.exceptions import SchemaChanged
+from crawler.models import JobQuery, NormalizedJob, RawJob
+from crawler.parser import parse_iso_date, select_text
+from crawler.storage.dedup import content_hash
 
 # Selectors — exported so tests can reference the exact strings (grill-me 10)
 AMS_JOB_CARD_SELECTOR = '[data-testid="job-card"]'
@@ -60,7 +62,7 @@ class AmsAdapter:
 # --- Parsing helpers (unit-tested in test_ams_parser.py) ---
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _build_absolute_url(href: str) -> str:

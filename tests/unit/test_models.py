@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
-from pydantic import ValidationError
+
 import pytest
-from crawler.models import JobQuery, RawJob, NormalizedJob
+from pydantic import ValidationError
+
+from crawler.models import JobQuery, NormalizedJob, RawJob
 
 
 def test_job_query_defaults():

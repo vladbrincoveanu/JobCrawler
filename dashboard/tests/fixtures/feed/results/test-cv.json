@@ -1,0 +1,72 @@
+{
+  "generated_at": "2026-07-30T12:00:00",
+  "cv": "/runner/tmp/cv.pdf",
+  "profile_source": "lexicon",
+  "total_matches": 137,
+  "jobs": [
+    {
+      "title": "Senior .NET Engineer",
+      "company": "ACME GmbH",
+      "location": "Wien, Austria",
+      "posted": "2026-07-30",
+      "salary": 85900,
+      "source": "karriere_at",
+      "apply_url": "https://example.com/jobs/1",
+      "score": 42,
+      "rank": 1,
+      "rank_score": 100,
+      "match_pct": 78,
+      "matched_skills": ["dotnet", "csharp", "kafka"],
+      "profile_skills": ["dotnet", "csharp", "kafka"],
+      "fit": null,
+      "reason": null,
+      "bucket": null,
+      "company_review": {
+        "company": "ACME GmbH",
+        "pros": ["strong engineering culture", "flexible hours"],
+        "cons": ["slow promotion cycles"],
+        "summary": "Stable employer with a good work-life balance.",
+        "source": "llm:test/model",
+        "generated_at": "2026-07-30T11:59:00"
+      }
+    },
+    {
+      "title": "Kafka Platform Engineer",
+      "company": "Beta AG",
+      "location": "Remote, EU",
+      "posted": "2026-07-10",
+      "salary": null,
+      "source": "arbeitnow",
+      "apply_url": "https://example.com/jobs/2",
+      "score": 30,
+      "rank": 2,
+      "rank_score": 60,
+      "match_pct": 21,
+      "matched_skills": ["kafka"],
+      "profile_skills": ["dotnet", "csharp", "kafka"],
+      "fit": null,
+      "reason": null,
+      "bucket": null,
+      "company_review": null
+    },
+    {
+      "title": "Backend Developer (undated ad)",
+      "company": "Gamma e.U.",
+      "location": "Graz, Austria",
+      "posted": null,
+      "salary": "EUR 4.500 brutto/Monat",
+      "source": "stepstone_at",
+      "apply_url": "https://example.com/jobs/3",
+      "score": 25,
+      "rank": 3,
+      "rank_score": 30,
+      "match_pct": 15,
+      "matched_skills": [],
+      "profile_skills": ["dotnet", "csharp", "kafka"],
+      "fit": null,
+      "reason": null,
+      "bucket": null,
+      "company_review": null
+    }
+  ]
+}

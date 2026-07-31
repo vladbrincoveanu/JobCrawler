@@ -21,13 +21,13 @@ export default async function JobsPage({ searchParams }: JobsPageProps) {
   const page = Math.max(1, parseInt(params.page ?? "1", 10) || 1);
   const offset = (page - 1) * PAGE_SIZE;
 
-  const { jobs, total } = listJobs({
+  const { jobs, total } = await listJobs({
     limit: PAGE_SIZE,
     offset,
     source,
     search,
   });
-  const sources = listSources();
+  const sources = await listSources();
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (

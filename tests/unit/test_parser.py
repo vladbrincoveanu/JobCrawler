@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
-from bs4 import BeautifulSoup
+
 import pytest
-from crawler.parser import select_text, select_attr, extract_jsonld, parse_iso_date
-from crawler.exceptions import SchemaChanged, MissingField
+from bs4 import BeautifulSoup
+
+from crawler.exceptions import MissingField, SchemaChanged
+from crawler.parser import extract_jsonld, parse_iso_date, select_attr, select_text
 
 
 def test_select_text_finds_element():

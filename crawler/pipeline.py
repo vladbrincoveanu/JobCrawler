@@ -1,24 +1,35 @@
 """Per-source crawl orchestrator with circuit breaker. Spec § Data Flow."""
 import asyncio
-import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Sequence
+
+import psycopg
+
 from crawler import config
 from crawler.exceptions import (
-    CrawlerError, FetchError, Blocked, CaptchaEncountered,
-    CookieExpired, SchemaChanged,
+    Blocked,
+    CaptchaEncountered,
+    CookieExpired,
+    CrawlerError,
+    FetchError,
+    SchemaChanged,
 )
 from crawler.models import JobQuery
 from crawler.sources.base import SourceAdapter
 from crawler.storage import repository as repo
 
 
-def _safe_log_error(conn: sqlite3.Connection, run_id: int, source: str,
+def _safe_log_error(conn: psycopg.Connection, run_id: int, source: str,
                     url: str | None, error_type: str, error_message: str) -> None:
     """Persist error but swallow DB errors so logging never crashes a run."""
     try:
-        repo.log_error(conn, run_id, source, url, error_type, error_message)
-    except sqlite3.Error:
+        repo.record_error(
+            conn, run_id,
+            stage=source,
+            message=f"{error_type}: {error_message}",
+            context={"url": str(url)} if url else None,
+        )
+    except psycopg.Error:
         pass
 
 
@@ -39,9 +50,7 @@ class _CircuitBreaker:
         self._opened = False
 
     def record(self, exc: Exception) -> None:
-        if isinstance(exc, Blocked):
-            self._opened = True
-        elif isinstance(exc, (CaptchaEncountered, CookieExpired, SchemaChanged)):
+        if isinstance(exc, Blocked) or isinstance(exc, (CaptchaEncountered, CookieExpired, SchemaChanged)):
             self._opened = True
         elif isinstance(exc, FetchError):
             self._consecutive_fetch_errors += 1
@@ -59,7 +68,7 @@ class _CircuitBreaker:
 CircuitOpen = _CircuitBreaker
 
 
-async def run_source(conn: sqlite3.Connection, adapter: SourceAdapter,
+async def run_source(conn: psycopg.Connection, adapter: SourceAdapter,
                      query: JobQuery, run_id: int, *, dry_run: bool = False) -> SourceResult:
     """Crawl a single source. Returns SourceResult (never raises).
 
@@ -76,7 +85,17 @@ async def run_source(conn: sqlite3.Connection, adapter: SourceAdapter,
                     if dry_run:
                         result.counters["inserted"] += 1  # count only
                     else:
-                        action = repo.upsert_job(conn, detail)
+                        row = repo.upsert_job(
+                            conn,
+                            source=detail.source,
+                            source_id=detail.source_id,
+                            url=str(detail.url),
+                            title=detail.title,
+                            company=detail.company,
+                            location=detail.location,
+                            description=detail.description,
+                        )
+                        action = "inserted" if row["created"] else "updated"
                         result.counters[action] += 1
                 except CrawlerError as e:
                     breaker.record(e)
@@ -90,7 +109,7 @@ async def run_source(conn: sqlite3.Connection, adapter: SourceAdapter,
         if result.status == "":
             result.status = "success" if result.counters["errors"] == 0 else "partial"
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         result.status = "failed"
         result.error = f"source timeout after {config.SOURCE_TIMEOUT_SECONDS}s"
         return result
@@ -109,7 +128,7 @@ async def run_source(conn: sqlite3.Connection, adapter: SourceAdapter,
         return result
 
 
-async def run(conn: sqlite3.Connection, adapters: Sequence[SourceAdapter],
+async def run(conn: psycopg.Connection, adapters: Sequence[SourceAdapter],
               query: JobQuery, run_id: int, *, dry_run: bool = False) -> list[SourceResult]:
     """Fan out to all sources. Always returns list (gather with no return_exceptions)."""
     return await asyncio.gather(*[run_source(conn, a, query, run_id, dry_run=dry_run) for a in adapters])

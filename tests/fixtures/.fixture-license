@@ -1,8 +1,13 @@
 # Test fixture license
 
-Fixtures in this directory are recorded HTML from ams.at (Austrian Public
-Employment Service) for the sole purpose of unit/integration testing the
+Fixtures in this directory are recorded HTML from Austrian job boards (ams.at,
+karriere.at, stepstone.at) for the sole purpose of unit/integration testing the
 JobCrawler pipeline.
+
+`stepstone_search_devops_wien.html` additionally keeps only the first 10 of the
+page's 25 cards, blanks inline SVG paths, and drops the emotion CSS blocks --
+except the one whose `[data-at="job-item"]` selector the card splitter must not
+mistake for a card.
 
 Per grill-me amendment 8: job descriptions are stripped via
 `scripts/record_fixtures.py:strip_descriptions()` before commit. Only

@@ -3,16 +3,15 @@ import { RunTable } from "@/components/RunTable";
 
 export const dynamic = "force-dynamic";
 
-export default function RunsPage() {
-  const runs = listRuns(100);
+export default async function RunsPage() {
+  const runs = await listRuns(100);
 
-  // Build errors map for all runs in one pass
-  const errorsByRun: Record<number, ReturnType<typeof listErrorsForRun>> = {};
-  for (const run of runs) {
-    if ((run.errors_count ?? 0) > 0) {
-      errorsByRun[run.id] = listErrorsForRun(run.id);
-    }
-  }
+  const errorsByRun: Record<number, Awaited<ReturnType<typeof listErrorsForRun>>> = {};
+  await Promise.all(
+    runs.map(async (run) => {
+      errorsByRun[run.id] = await listErrorsForRun(run.id);
+    })
+  );
 
   return (
     <div className="space-y-6">

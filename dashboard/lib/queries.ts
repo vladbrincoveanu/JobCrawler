@@ -1,4 +1,4 @@
-import { getDb } from "./db";
+import { getPool } from "./db";
 
 // --- Row types (mirror V001__initial.sql) ---
 
@@ -11,87 +11,72 @@ export interface JobRow {
   company: string | null;
   location: string | null;
   description: string | null;
-  salary: string | null;
-  employment_type: string | null;
-  posted_at: string | null;
   content_hash: string;
-  raw_html: string | null;
   first_seen_at: string;
   last_seen_at: string;
-  is_active: number;
 }
 
 export interface RunRow {
   id: number;
   source: string;
   started_at: string;
-  finished_at: string | null;
-  status: "running" | "success" | "partial" | "failed" | "dry_run";
-  jobs_found: number | null;
-  jobs_inserted: number | null;
-  jobs_updated: number | null;
-  errors_count: number | null;
+  ended_at: string | null;
+  status: "pending" | "running" | "success" | "partial" | "failed";
+  jobs_found: number;
+  jobs_new: number;
 }
 
 export interface ErrorRow {
   id: number;
   run_id: number;
-  source: string;
-  url: string | null;
-  error_type: string;
-  error_message: string | null;
   occurred_at: string;
+  stage: string;
+  message: string;
 }
 
 export interface Stats {
-  totalJobs: number;
-  activeJobs: number;
-  totalRuns: number;
+  jobsTotal: number;
+  runsSuccess: number;
+  runsFailed: number;
+  errorsTotal: number;
+  bySource: Record<string, number>;
   lastRun: RunRow | null;
-  last24hErrors: number;
 }
 
-// --- Queries ---
+// --- Queries (async — pg.Pool is async) ---
 
-const JOB_COLUMNS =
-  "id, source, source_id, url, title, company, location, description, salary, " +
-  "employment_type, posted_at, content_hash, raw_html, first_seen_at, last_seen_at, is_active";
-
-const RUN_COLUMNS =
-  "id, source, started_at, finished_at, status, jobs_found, jobs_inserted, " +
-  "jobs_updated, errors_count";
-
-export function getStats(): Stats {
-  const db = getDb();
-  const totalJobs =
-    (db.prepare("SELECT COUNT(*) AS n FROM jobs").get() as { n: number }).n ?? 0;
-  const activeJobs =
-    (db
-      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE is_active = 1")
-      .get() as { n: number }).n ?? 0;
-  const totalRuns =
-    (db.prepare("SELECT COUNT(*) AS n FROM crawl_runs").get() as {
-      n: number;
-    }).n ?? 0;
-  const lastRun = db
-    .prepare(
-      `SELECT ${RUN_COLUMNS} FROM crawl_runs ORDER BY id DESC LIMIT 1`
-    )
-    .get() as RunRow | undefined;
-
-  // Errors in the last 24 hours
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const last24hErrors =
-    (db
-      .prepare("SELECT COUNT(*) AS n FROM crawl_errors WHERE occurred_at >= ?")
-      .get(cutoff) as { n: number }).n ?? 0;
-
+export async function getStats(): Promise<Stats> {
+  const pool = getPool();
+  const [jobsRes, successRes, failedRes, errorsRes, bySourceRes, lastRunRes] =
+    await Promise.all([
+      pool.query<{ n: string }>("SELECT COUNT(*)::int AS n FROM jobs"),
+      pool.query<{ n: string }>(
+        "SELECT COUNT(*)::int AS n FROM runs WHERE status = 'success'"
+      ),
+      pool.query<{ n: string }>(
+        "SELECT COUNT(*)::int AS n FROM runs WHERE status IN ('failed', 'partial')"
+      ),
+      pool.query<{ n: string }>("SELECT COUNT(*)::int AS n FROM run_errors"),
+      pool.query<{ source: string; n: string }>(
+        "SELECT source, COUNT(*)::int AS n FROM jobs GROUP BY source"
+      ),
+      pool.query<RunRow>(
+        // id DESC breaks ties on started_at. Without it two runs that begin
+        // inside the same clock tick -- which the seeder does, and which two
+        // sources crawled back-to-back do in production -- order arbitrarily,
+        // so the "Last run" card could show the earlier of the two.
+        "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT 1"
+      ),
+    ]);
   return {
-    totalJobs,
-    activeJobs,
-    totalRuns,
-    lastRun: lastRun ?? null,
-    last24hErrors,
+    jobsTotal: Number(jobsRes.rows[0]?.n ?? 0),
+    runsSuccess: Number(successRes.rows[0]?.n ?? 0),
+    runsFailed: Number(failedRes.rows[0]?.n ?? 0),
+    errorsTotal: Number(errorsRes.rows[0]?.n ?? 0),
+    bySource: Object.fromEntries(
+      bySourceRes.rows.map((r) => [r.source, Number(r.n)])
+    ),
+    lastRun: lastRunRes.rows[0] ?? null,
   };
 }
 
@@ -107,73 +92,79 @@ export interface ListJobsResult {
   total: number;
 }
 
-export function listJobs(opts: ListJobsOptions = {}): ListJobsResult {
-  const db = getDb();
+export async function listJobs(
+  opts: ListJobsOptions = {}
+): Promise<ListJobsResult> {
+  const pool = getPool();
   const limit = Math.min(opts.limit ?? 100, 500);
   const offset = opts.offset ?? 0;
   const params: (string | number)[] = [];
   const where: string[] = [];
 
   if (opts.source) {
-    where.push("source = ?");
+    where.push(`source = $${params.length + 1}`);
     params.push(opts.source);
   }
   if (opts.search) {
-    where.push("(title LIKE ? OR company LIKE ?)");
+    where.push(
+      `(title ILIKE $${params.length + 1} OR company ILIKE $${params.length + 2})`
+    );
     const q = `%${opts.search}%`;
     params.push(q, q);
   }
 
   const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const jobs = db
-    .prepare(
-      `SELECT ${JOB_COLUMNS} FROM jobs ${whereClause} ` +
-        `ORDER BY last_seen_at DESC LIMIT ? OFFSET ?`
-    )
-    .all(...params, limit, offset) as JobRow[];
+  const jobsRes = await pool.query<JobRow>(
+    `SELECT id, source, source_id, url, title, company, location, description, ` +
+      `content_hash, first_seen_at, last_seen_at ` +
+      `FROM jobs ${whereClause} ` +
+      `ORDER BY last_seen_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+    [...params, limit, offset]
+  );
 
-  const total =
-    (db
-      .prepare(`SELECT COUNT(*) AS n FROM jobs ${whereClause}`)
-      .get(...params) as { n: number }).n ?? 0;
+  const totalRes = await pool.query<{ n: string }>(
+    `SELECT COUNT(*)::int AS n FROM jobs ${whereClause}`,
+    params
+  );
 
-  return { jobs, total };
+  return { jobs: jobsRes.rows, total: Number(totalRes.rows[0]?.n ?? 0) };
 }
 
-export function listSources(): string[] {
-  const db = getDb();
-  const rows = db
-    .prepare("SELECT DISTINCT source FROM jobs ORDER BY source")
-    .all() as { source: string }[];
-  return rows.map((r) => r.source);
+export async function listSources(): Promise<string[]> {
+  const pool = getPool();
+  const res = await pool.query<{ source: string }>(
+    "SELECT DISTINCT source FROM jobs ORDER BY source"
+  );
+  return res.rows.map((r) => r.source);
 }
 
-export function listRuns(limit = 50): RunRow[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT ${RUN_COLUMNS} FROM crawl_runs ORDER BY id DESC LIMIT ?`
-    )
-    .all(limit) as RunRow[];
+export async function listRuns(limit = 50): Promise<RunRow[]> {
+  const pool = getPool();
+  const res = await pool.query<RunRow>(
+    // Same tie-break as getStats(): equal timestamps must not shuffle the list.
+    "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT $1",
+    [limit]
+  );
+  return res.rows;
 }
 
-export function listErrors(limit = 50): ErrorRow[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT id, run_id, source, url, error_type, error_message, occurred_at " +
-        "FROM crawl_errors ORDER BY id DESC LIMIT ?"
-    )
-    .all(limit) as ErrorRow[];
+export async function listErrors(limit = 50): Promise<ErrorRow[]> {
+  const pool = getPool();
+  const res = await pool.query<ErrorRow>(
+    "SELECT id, run_id, occurred_at, stage, message FROM run_errors " +
+      "ORDER BY occurred_at DESC LIMIT $1",
+    [limit]
+  );
+  return res.rows;
 }
 
-export function listErrorsForRun(runId: number): ErrorRow[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT id, run_id, source, url, error_type, error_message, occurred_at " +
-        "FROM crawl_errors WHERE run_id = ? ORDER BY id ASC"
-    )
-    .all(runId) as ErrorRow[];
+export async function listErrorsForRun(runId: number): Promise<ErrorRow[]> {
+  const pool = getPool();
+  const res = await pool.query<ErrorRow>(
+    "SELECT id, run_id, occurred_at, stage, message FROM run_errors " +
+      "WHERE run_id = $1 ORDER BY occurred_at ASC",
+    [runId]
+  );
+  return res.rows;
 }

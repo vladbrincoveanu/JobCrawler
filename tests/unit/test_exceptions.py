@@ -1,9 +1,24 @@
 import pytest
+
 from crawler.exceptions import (
-    CrawlerError, FetchError, RateLimited, Blocked, CaptchaEncountered,
-    CookieExpired, SPAWaitTimeout, Timeout, HTTPError, NetworkError,
-    ParseError, SchemaChanged, MissingField, StorageError, MigrationError, ConstraintError,
+    Blocked,
+    CaptchaEncountered,
+    ConstraintError,
+    CookieExpired,
+    CrawlerError,
+    FetchError,
+    HTTPError,
+    MigrationError,
+    MissingField,
+    NetworkError,
+    ParseError,
+    RateLimited,
+    SchemaChanged,
+    SPAWaitTimeout,
+    StorageError,
+    Timeout,
 )
+
 
 def test_crawler_error_is_base():
     assert issubclass(FetchError, CrawlerError)

@@ -1,0 +1,83 @@
+{
+  "_comment": [
+    "Bucket definitions for the CV-matched job scout.",
+    "JobCrawler owns HOW to search (search_terms). career/Resume/JOB-SEARCH/keywords/",
+    "owns WHAT the CV claims (keyword_file) -- do not duplicate keywords here.",
+    "Buckets A/B/C come from career/Resume/JOB-SEARCH/CAREER-BUCKETS.md;",
+    "D exists as a built CV variant in kwcheck.sh but is not yet a bucket there."
+  ],
+  "keywords_dir": "~/Desktop/Startup/career/Resume/JOB-SEARCH/keywords",
+  "cv_dir": "~/Desktop/Startup/career/Resume",
+  "buckets": [
+    {
+      "id": "A",
+      "label": "Backend / Distributed / Streaming",
+      "cv": "Vlad_Brincoveanu_CV_Backend_Streaming.pdf",
+      "keyword_file": "backend-streaming.txt",
+      "search_terms": [
+        "senior backend engineer",
+        "backend entwickler",
+        ".net entwickler",
+        "software architect",
+        "kafka",
+        "event driven",
+        "distributed systems",
+        "c# developer"
+      ]
+    },
+    {
+      "id": "B",
+      "label": "Full-stack .NET + Angular",
+      "cv": "Vlad_Brincoveanu_CV_FullStack.pdf",
+      "keyword_file": "full-stack.txt",
+      "search_terms": [
+        "fullstack developer",
+        "full stack entwickler",
+        ".net angular",
+        "typescript entwickler",
+        "senior software engineer",
+        "softwareentwickler",
+        "web developer",
+        "asp.net"
+      ]
+    },
+    {
+      "id": "C",
+      "label": "DevOps / SRE / Platform",
+      "cv": "Vlad_Brincoveanu_CV_DevOps_SRE.pdf",
+      "keyword_file": "devops-sre.txt",
+      "search_terms": [
+        "devops engineer",
+        "site reliability engineer",
+        "platform engineer",
+        "cloud engineer",
+        "infrastructure engineer",
+        "kubernetes",
+        "terraform",
+        "sre"
+      ],
+      "exclude_terms": [
+        "disaster recovery",
+        "business continuity",
+        "audit readiness",
+        "regulatory reporting",
+        "ansible"
+      ],
+      "_exclude_rationale": "Revolut post-mortem in CAREER-BUCKETS.md: these are real, non-weekend gaps. Filter the roles out rather than paper over them."
+    },
+    {
+      "id": "D",
+      "label": "AI / Agentic Engineering",
+      "cv": "Vlad_Brincoveanu_CV_AI_Agentic.pdf",
+      "keyword_file": "ai-agentic.txt",
+      "search_terms": [
+        "ai engineer",
+        "machine learning engineer",
+        "llm engineer",
+        "ai software engineer",
+        "generative ai",
+        "python engineer"
+      ]
+    }
+  ]
+}

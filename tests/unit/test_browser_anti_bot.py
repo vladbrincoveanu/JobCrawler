@@ -1,6 +1,7 @@
 import pytest
+
 from crawler.browser import _detect_anti_bot
-from crawler.exceptions import CaptchaEncountered, Blocked
+from crawler.exceptions import Blocked, CaptchaEncountered
 
 
 def test_detect_captcha_title():

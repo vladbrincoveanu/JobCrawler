@@ -1,0 +1,44 @@
+# docker-compose.yml — local PG + dashboard for dev
+services:
+  postgres:
+    image: pgvector/pgvector:pg16   # pgvector preinstalled
+    container_name: jobcrawler-pg
+    environment:
+      POSTGRES_USER: jobcrawler
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: jobcrawler
+    ports:
+      - "5433:5432"   # host 5433 → container 5432 (host 5432 occupied by knowledgeforge-postgres)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobcrawler -d jobcrawler"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: jobcrawler-dashboard
+    environment:
+      # host.docker.internal: container's view of the host machine.
+      # Lets the dashboard reach Postgres running on the host at :5433.
+      # (In Linux compose, use `network_mode: host` or add extra_hosts for
+      #  gateway:host-gateway — see README for platform-specific notes.)
+      DATABASE_URL: postgresql://jobcrawler:dev@host.docker.internal:5433/jobcrawler
+      NODE_ENV: development
+    ports:
+      - "3011:3011"
+    volumes:
+      # Mount source for hot reload; node_modules stays in the image
+      - ./dashboard:/app
+      - /app/node_modules   # anonymous volume prevents host mount from clobbering installed deps
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

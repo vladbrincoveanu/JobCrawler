@@ -1,5 +1,5 @@
-"""Named constants. Sub-project 1: no env override. Sub-project 4 wires env."""
-from pathlib import Path
+"""JobCrawler config constants."""
+import os
 
 # Concurrency
 MAX_CONCURRENT_FETCHES_PER_SOURCE: int = 4
@@ -18,7 +18,18 @@ SIGINT_GRACE_SECONDS: int = 30
 
 # Database
 DB_BUSY_TIMEOUT_SECONDS: int = 30
-DB_PATH: Path = Path("data/jobs.db")
+
+# Postgres connection (read from env)
+DATABASE_URL: str = os.environ.get(
+    "DATABASE_URL", "postgresql://jobcrawler:dev@localhost:5433/jobcrawler"
+)
+
+# AMS crawler
+AMS_BASE_URL: str = os.environ.get("AMS_BASE_URL", "https://jobs.ams.at/public/")
+AMS_COOKIE_DOMAIN: str = os.environ.get("AMS_COOKIE_DOMAIN", ".ams.at")
+
+# Statement timeout (ms)
+PG_STATEMENT_TIMEOUT_MS: int = int(os.environ.get("PG_STATEMENT_TIMEOUT_MS", "30000"))
 
 # Retry
 RETRY_MAX_ATTEMPTS: int = 3
@@ -32,8 +43,6 @@ BROWSER_CAPTCHA_BACKOFF_SECONDS: int = 60
 BROWSER_UA_POOL_SIZE: int = 10
 
 # AMS (grill-me amendment 6: explicit URL/cookie domain config)
-AMS_BASE_URL: str = "https://jobs.ams.at/public/"
-AMS_COOKIE_DOMAIN: str = ".ams.at"
 AMS_RATE_LIMIT_PER_MIN: int = 10
 AMS_REQUEST_JITTER_SECONDS: int = 2
 AMS_CAPTCHA_TUNE_THRESHOLD: float = 0.001

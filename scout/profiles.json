@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "ai-agentic",
+      "label": "AI / Agentic",
+      "enabled": true,
+      "schedule": { "hours_utc": [5], "weekdays_only": false },
+      "filters": {
+        "days": 7,
+        "top": 50,
+        "require_salary": false,
+        "sources": "apis,karriere,adzuna,jooble"
+      },
+      "alert": { "min_match": 75 }
+    },
+    {
+      "id": "backend-streaming",
+      "label": "Backend / Streaming",
+      "enabled": true,
+      "schedule": { "hours_utc": [5], "weekdays_only": false },
+      "filters": {
+        "days": 7,
+        "top": 50,
+        "require_salary": false,
+        "sources": "apis,karriere,adzuna,jooble"
+      },
+      "alert": { "min_match": 75 }
+    },
+    {
+      "id": "devops-sre",
+      "label": "DevOps / SRE",
+      "enabled": true,
+      "schedule": { "hours_utc": [5], "weekdays_only": false },
+      "filters": {
+        "days": 7,
+        "top": 50,
+        "require_salary": false,
+        "sources": "apis,karriere,adzuna,jooble"
+      },
+      "alert": { "min_match": 75 }
+    },
+    {
+      "id": "fullstack",
+      "label": "FullStack",
+      "enabled": true,
+      "schedule": { "hours_utc": [5], "weekdays_only": false },
+      "filters": {
+        "days": 7,
+        "top": 50,
+        "require_salary": false,
+        "sources": "apis,karriere,adzuna,jooble"
+      },
+      "alert": { "min_match": 75 }
+    }
+  ]
+}

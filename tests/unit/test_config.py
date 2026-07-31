@@ -1,8 +1,8 @@
-from pathlib import Path
 from crawler import config
 
-def test_db_path_default():
-    assert config.DB_PATH == Path("data/jobs.db")
+
+def test_database_url_default():
+    assert "postgresql://" in config.DATABASE_URL
 
 def test_source_timeout():
     assert config.SOURCE_TIMEOUT_SECONDS == 600

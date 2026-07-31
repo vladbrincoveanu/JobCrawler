@@ -1,15 +1,12 @@
 """Integration: 1 broken job among 2 → partial status, 1 inserted, 1 error logged."""
 import pytest
-from datetime import datetime, timezone
-from crawler import config
-from crawler.storage.db import connect
-from crawler.storage.migrations.runner import apply as apply_migrations
-from crawler.storage.repository import start_run
-from crawler.sources.ams import AmsAdapter
-from crawler.pipeline import run
-from crawler.models import JobQuery
-from tests.fakes.browser import FakeBrowserContext
 
+from crawler import config
+from crawler.models import JobQuery
+from crawler.pipeline import run
+from crawler.sources.ams import AmsAdapter
+from crawler.storage import repository as repo
+from tests.fakes.browser import FakeBrowserContext
 
 SEARCH_HTML = '''
 <html><body>
@@ -44,11 +41,9 @@ BROKEN_DETAIL = '<html><body>no detail selector</body></html>'
 
 
 @pytest.mark.asyncio
-async def test_partial_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "jobs.db")
-    conn = connect(config.DB_PATH)
-    apply_migrations(conn)
-    run_id = start_run(conn, source="ams")
+async def test_partial_run(pg_conn):
+    repo.upsert_source(pg_conn, "ams")
+    run_id = repo.start_run(pg_conn, source="ams")
 
     fake = FakeBrowserContext({
         config.AMS_BASE_URL + "jobs": SEARCH_HTML,
@@ -56,9 +51,11 @@ async def test_partial_run(tmp_path, monkeypatch):
         "https://jobs.ams.at/public/jobs/456": BROKEN_DETAIL,
     })
     adapter = AmsAdapter(browser=fake)
-    results = await run(conn, [adapter], JobQuery(), run_id=run_id)
+    results = await run(pg_conn, [adapter], JobQuery(), run_id=run_id)
     assert results[0].status == "partial"
     assert results[0].counters["inserted"] == 1
     assert results[0].counters["errors"] == 1
-    errs = conn.execute("SELECT * FROM crawl_errors").fetchall()
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT * FROM run_errors")
+        errs = cur.fetchall()
     assert len(errs) == 1

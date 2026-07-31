@@ -9,6 +9,7 @@ node_modules/
 out/
 build/
 dist/
+dist-server/
 *.tsbuildinfo
 next-env.d.ts
 .turbo/
@@ -55,6 +56,13 @@ graphify-out/
 .claude/relentless-status-*.md
 .claude/settings.local.json
 
+# Tooling session captures (regenerable, not source)
+.playwright-mcp/
+.superpowers/
+
+# Dashboard exploration screenshots (regenerable from a running dev server)
+dashboard-*.png
+
 # IDE
 .idea/
 .vscode/
@@ -71,3 +79,27 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Postgres local data
+.pgdata/
+postgres-data/
+data/profile.json
+data/profiles/
+# CV PDFs. THIS REPOSITORY IS PUBLIC -- a CV committed here is a name, an email
+# address, a phone number and an employment history published forever. Only the
+# derived profile (scout/profiles/<id>.json: skills, role_titles, source) is
+# ever committed.
+data/cv/
+data/sent_jobs.json
+data/uploads/
+data/dashboard.html
+data/dashboards/
+# Scan output: produced by the scout-cron workflow (published to the
+# scout-data branch) or by a local scout.py run. Regenerable, and it carries
+# a specific person's match list.
+data/scout/
+data/company_reviews/
+logs/
+
+# Test build output (NEXT_DIST_DIR)
+.next-test/

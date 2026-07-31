@@ -5,11 +5,12 @@ Spec § Browser wrapper. FakeBrowserContext lives in tests/fakes/browser.py
 """
 import json
 import random
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
 from crawler import config
-from crawler.exceptions import CaptchaEncountered, Blocked, SPAWaitTimeout
+from crawler.exceptions import Blocked, CaptchaEncountered, SPAWaitTimeout
 
 ANTI_BOT_TITLE_KEYWORDS = ("captcha", "verify")
 ANTI_BOT_BODY_KEYWORDS = ("access denied", "are you a human", "unusual traffic")
@@ -56,7 +57,7 @@ class SessionCookieStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema_version": 1,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "saved_at": datetime.now(UTC).isoformat(),
             "cookies": cookies,
         }
         self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

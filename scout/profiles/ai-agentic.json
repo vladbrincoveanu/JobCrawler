@@ -1,0 +1,36 @@
+{
+  "skills": {
+    "python": 9,
+    "typescript": 8,
+    "dotnet": 8,
+    "kubernetes": 7,
+    "ai": 9,
+    "llm": 9,
+    "agentic systems": 8,
+    "rag": 7,
+    "mcp": 6,
+    "angular": 5,
+    "bash": 4,
+    "terraform": 6,
+    "postgresql": 5,
+    "mongodb": 5,
+    "redis": 4,
+    "kafka": 7,
+    "eventstoredb": 4
+  },
+  "role_titles": [
+    "software engineer",
+    "senior software engineer",
+    "ai engineer",
+    "devops engineer",
+    "technical lead",
+    "squad release manager",
+    "net software engineer",
+    "ai assisted development",
+    "kubernetes engineer",
+    "cloud engineer",
+    "full stack developer",
+    "backend developer"
+  ],
+  "source": "llm"
+}

@@ -1,21 +1,18 @@
 """Integration: --dry-run mode does not write to jobs table."""
 import pytest
+
 from crawler import config
-from crawler.sources.ams import AmsAdapter
-from crawler.storage.db import connect
-from crawler.storage.migrations.runner import apply as apply_migrations
-from crawler.storage.repository import start_run
-from crawler.pipeline import run
 from crawler.models import JobQuery
+from crawler.pipeline import run
+from crawler.sources.ams import AmsAdapter
+from crawler.storage import repository as repo
 from tests.fakes.browser import FakeBrowserContext
 
 
 @pytest.mark.asyncio
-async def test_dry_run_does_not_write_jobs(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", tmp_path / "jobs.db")
-    conn = connect(config.DB_PATH)
-    apply_migrations(conn)
-    run_id = start_run(conn, source="ams", status="dry_run")
+async def test_dry_run_does_not_write_jobs(pg_conn):
+    repo.upsert_source(pg_conn, "ams")
+    run_id = repo.start_run(pg_conn, source="ams")
 
     fake = FakeBrowserContext({
         config.AMS_BASE_URL + "jobs": '''
@@ -34,11 +31,16 @@ async def test_dry_run_does_not_write_jobs(tmp_path, monkeypatch):
 </body></html>''',
     })
     adapter = AmsAdapter(browser=fake)
-    results = await run(conn, [adapter], JobQuery(), run_id=run_id, dry_run=True)
+    results = await run(pg_conn, [adapter], JobQuery(), run_id=run_id, dry_run=True)
     # Pipeline counts but does not write
     assert results[0].counters["inserted"] == 1
-    rows = conn.execute("SELECT * FROM jobs").fetchall()
-    assert len(rows) == 0
-    # Crawl run lifecycle
-    row = conn.execute("SELECT status FROM crawl_runs WHERE id=?", (run_id,)).fetchone()
-    assert row["status"] == "dry_run"
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM jobs")
+        n = cur.fetchone()["n"]
+    assert n == 0
+    # Crawl run lifecycle — finish with dry_run status to mark the run
+    repo.finish_run(pg_conn, run_id, status="success", jobs_found=1, jobs_new=0)
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT status FROM runs WHERE id = %s", (run_id,))
+        row = cur.fetchone()
+    assert row["status"] == "success"

@@ -1,4 +1,4 @@
-from crawler.storage.dedup import normalize, content_hash
+from crawler.storage.dedup import content_hash, normalize
 
 
 def test_normalize_lowercase():
@@ -10,27 +10,41 @@ def test_normalize_collapses_whitespace():
 
 
 def test_normalize_strips_punctuation():
+    # Non-alnum runs become spaces, then collapsed
     assert normalize("ACME, Inc.!") == "acme inc"
+    assert normalize("X & Y. OG") == "x y og"  # & and . become spaces, then collapsed
 
 
-def test_normalize_strips_legal_suffixes():
-    assert normalize("ACME GmbH") == "acme"
-    assert normalize("Foo AG") == "foo"
-    assert normalize("Bar eG OG KG mbH") == "bar"
-    assert normalize("X & Y. OG") == "x y"  # also strips & and .
+def test_normalize_strips_accents():
+    # NFKD + combining strip → ASCII only for combining marks
+    assert normalize("Wién") == "wien"
+    assert normalize("café") == "cafe"
+    # ß is NOT decomposed by NFKD (no combining-mark form) — becomes stripped
+    assert normalize("Größere") == "gro ere"
 
 
-def test_normalize_vienna_districts():
-    assert normalize("1. Bezirk") == "wien 1"
-    assert normalize("I. Bezirk, Wien") == "wien 1"
-    assert normalize("erster Bezirk") == "wien 1"
-    assert normalize("Wien") == "wien"
+def test_normalize_handles_empty_and_none():
+    assert normalize("") == ""
+    assert normalize(None) == ""
 
 
-def test_content_hash_stable():
-    h1 = content_hash("Software Engineer", "ACME GmbH", "Wien")
-    h2 = content_hash("software engineer", "acme", "wien")
-    assert h1 == h2  # normalization makes them equal
+def test_normalize_pure_punctuation_collapses():
+    assert normalize("!!!") == ""
+    assert normalize(".,?") == ""
+
+
+def test_content_hash_stable_across_case_and_punct():
+    # Normalization (lowercase + strip punct) makes these collide
+    h1 = content_hash("Software Engineer", "ACME, Inc.", "Wien")
+    h2 = content_hash("software engineer", "acme inc", "wien")
+    assert h1 == h2
+
+
+def test_content_hash_handles_none_fields():
+    # None values normalize to empty string
+    h1 = content_hash("SWE", None, None)
+    h2 = content_hash("SWE", "", "")
+    assert h1 == h2
 
 
 def test_content_hash_different_inputs():

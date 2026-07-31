@@ -1,10 +1,11 @@
 """Generic HTML/JSON parsing helpers. Per-source logic lives in sources/*.py."""
 import json
-import re
 from datetime import datetime
 from typing import Any
+
 from bs4 import BeautifulSoup
-from crawler.exceptions import SchemaChanged, MissingField
+
+from crawler.exceptions import MissingField, SchemaChanged
 
 
 def select_text(soup: BeautifulSoup, selector: str, *, required: bool = False) -> str | None:

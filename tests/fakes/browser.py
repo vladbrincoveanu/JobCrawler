@@ -4,7 +4,9 @@ Grill-me amendment 1: lives in tests/fakes/, NOT crawler/browser.py.
 Keeps Playwright import chain out of test path.
 """
 from typing import Any
+
 from bs4 import BeautifulSoup
+
 from crawler import config
 from crawler.browser import _detect_anti_bot
 from crawler.exceptions import SPAWaitTimeout
