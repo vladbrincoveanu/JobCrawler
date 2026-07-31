@@ -85,6 +85,11 @@ pnpm-debug.log*
 postgres-data/
 data/profile.json
 data/profiles/
+# CV PDFs. THIS REPOSITORY IS PUBLIC -- a CV committed here is a name, an email
+# address, a phone number and an employment history published forever. Only the
+# derived profile (scout/profiles/<id>.json: skills, role_titles, source) is
+# ever committed.
+data/cv/
 data/sent_jobs.json
 data/uploads/
 data/dashboard.html

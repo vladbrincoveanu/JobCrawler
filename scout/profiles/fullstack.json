@@ -1,0 +1,35 @@
+{
+  "skills": {
+    "typescript": 9,
+    "angular": 8,
+    "react": 7,
+    "nextjs": 6,
+    "dotnet": 9,
+    "c#": 8,
+    "postgres": 7,
+    "sqlserver": 6,
+    "mongodb": 5,
+    "kubernetes": 6,
+    "azure": 5,
+    "aws": 5,
+    "docker": 4,
+    "ci/cd": 8,
+    "agile/scrum": 6,
+    "jira": 4
+  },
+  "role_titles": [
+    "software engineer",
+    "full stack",
+    "net developer",
+    "typescript developer",
+    "angular developer",
+    "react developer",
+    "devops engineer",
+    "cloud engineer",
+    "senior software engineer",
+    "technical lead",
+    "squad lead",
+    "release manager"
+  ],
+  "source": "llm"
+}

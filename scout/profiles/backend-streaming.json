@@ -1,0 +1,35 @@
+{
+  "skills": {
+    "dotnet": 10,
+    "csharp": 10,
+    "azure": 7,
+    "kafka": 6,
+    "kubernetes": 6,
+    "docker": 4,
+    "microservices": 6,
+    "distributed-systems": 7,
+    "angular": 5,
+    "typescript": 4,
+    "python": 5,
+    "sql": 4,
+    "ai-llm": 8,
+    "aws": 4,
+    "devops": 4,
+    "backend": 6
+  },
+  "role_titles": [
+    ".net",
+    "c#",
+    "backend",
+    "software engineer",
+    "software developer",
+    "softwareentwickler",
+    "software-entwickler",
+    "full stack",
+    "fullstack",
+    "tech lead",
+    "platform engineer",
+    "ai engineer"
+  ],
+  "source": "lexicon"
+}
