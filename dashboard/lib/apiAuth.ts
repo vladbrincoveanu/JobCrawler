@@ -5,10 +5,12 @@ import { SESSION_COOKIE, authConfigured, verifySession } from "@/lib/auth";
 /**
  * The guard every mutating route calls first.
  *
- * Middleware already redirects unauthenticated browsers, but middleware is a
- * routing concern and one matcher edit away from not covering a new path. These
- * routes commit to a repository and spend CI minutes, so they check for
- * themselves rather than inheriting somebody else's matcher.
+ * There is deliberately no middleware.ts. An earlier version of this comment
+ * claimed one existed and treated it as the first line of defence, which was
+ * wrong in the way that matters: /api/scout was left unguarded for a while on
+ * the strength of a layer that was never there. Each route checks for itself,
+ * and each page checks its own session (see app/profiles/page.tsx) -- so there
+ * is no matcher list that can silently stop covering a new path.
  */
 export async function requireSession(req: Request): Promise<NextResponse | null> {
   if (!authConfigured()) {

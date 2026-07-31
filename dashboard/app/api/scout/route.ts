@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { spawn } from "node:child_process";
+
+import { requireSession } from "@/lib/apiAuth";
+import { authConfigured } from "@/lib/auth";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -111,7 +114,24 @@ export interface ScoutResult {
 }
 
 export async function POST(request: NextRequest) {
-  // This route spawns python and waits minutes for it. On the Vercel deployment
+  // This is the most expensive route in the app: it writes an upload to disk and
+  // spawns a scan that runs for minutes and bills NVIDIA_API_KEY. It used to be
+  // guarded only by the scout.py-must-exist check below -- which does happen to
+  // hold on Vercel and in the Docker image, but that is a deployment-layout
+  // accident, not an authorization decision, and it would evaporate the day
+  // somebody built an image from the repository root.
+  //
+  // Gated on authConfigured() rather than unconditionally: with no password set
+  // there is no session anybody could present, so requiring one would delete the
+  // feature on the local checkout that is its only real user. A deployment that
+  // strangers can reach is a deployment with DASHBOARD_PASSWORD set -- /profiles
+  // already says so in red when it is not.
+  if (authConfigured()) {
+    const denied = await requireSession(request);
+    if (denied) return denied;
+  }
+
+  // On the Vercel deployment
   // there is no python and the function is killed long before a scan finishes,
   // so it fails -- but it fails as a timeout after several minutes, which reads
   // as "my CV broke it". Refusing up front, with the reason, is the honest

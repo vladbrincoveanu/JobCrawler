@@ -16,7 +16,9 @@
  * a missing env var on a deployment is exactly when that would matter.
  * Reads stay open: the published feed is a public branch anyway.
  *
- * Web Crypto only (no node:crypto), so this runs unchanged in edge middleware.
+ * Web Crypto only (no node:crypto), so this runs unchanged on the edge runtime
+ * as well as in Node -- there is no middleware today, but nothing here would
+ * have to change to add one.
  */
 
 export const SESSION_COOKIE = "scout_session";

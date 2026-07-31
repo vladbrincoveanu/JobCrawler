@@ -14,10 +14,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# The same shape the dashboard enforces in lib/cvProfiles.ts. Enforced again
+# here because the dashboard is not the only way a profile reaches this file --
+# a pull request against scout/profiles.json is another -- and every id printed
+# by this script becomes a path component on the runner:
+# scout/profiles/<id>.json, $STATE_DIR/results/<id>.json, $RUNNER_TEMP/<id>.raw.json.
+# The workflow quotes them, so an id was never a command injection; an id of
+# "../../x" was still a write outside the state directory, and an id containing
+# a newline still split into two ids in the due list.
+CV_ID_RE = re.compile(r"^[a-z0-9-]{1,40}$")
+
+
+def valid_id(cv_id: object) -> bool:
+    return isinstance(cv_id, str) and bool(CV_ID_RE.match(cv_id))
+
+
+def checked_id(cv_id: object) -> str:
+    """A profile id that is safe to use as a path component, or a hard failure."""
+    if not valid_id(cv_id):
+        raise SystemExit(
+            f"::error::refusing to use profile id {cv_id!r}: "
+            "ids must be 1-40 chars of lowercase letters, digits and dashes."
+        )
+    return str(cv_id)
 
 # How long after its scheduled hour a slot may still be picked up. GitHub delays
 # scheduled workflows on public repos by 5-20+ minutes routinely and drops ticks
@@ -79,8 +104,8 @@ def load_run(runs_dir: Path, cv_id: str) -> dict | None:
 def select_due(profiles_path: Path, runs_dir: Path, now: datetime) -> list[str]:
     doc = json.loads(profiles_path.read_text())
     return [
-        p["id"] for p in doc.get("profiles", [])
-        if is_due(p, now, load_run(runs_dir, p["id"]))
+        checked_id(p["id"]) for p in doc.get("profiles", [])
+        if is_due(p, now, load_run(runs_dir, checked_id(p["id"])))
     ]
 
 
@@ -128,16 +153,21 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.filters_for:
+        cv_id = checked_id(args.filters_for)
         doc = json.loads(args.profiles.read_text())
-        print(shell_filters(
-            next(p for p in doc["profiles"] if p["id"] == args.filters_for)))
+        # StopIteration here would be a bare traceback and, because the workflow
+        # runs this inside `eval "$(...)"`, a silently empty assignment block.
+        profile = next((p for p in doc["profiles"] if p["id"] == cv_id), None)
+        if profile is None:
+            raise SystemExit(f"::error::no profile with id {cv_id!r} in {args.profiles}")
+        print(shell_filters(profile))
         return 0
 
     if args.all_enabled:
         doc = json.loads(args.profiles.read_text())
         for p in doc.get("profiles", []):
             if p.get("enabled", True):
-                print(p["id"])
+                print(checked_id(p["id"]))
         return 0
 
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
@@ -145,10 +175,13 @@ def main() -> int:
         now = now.replace(tzinfo=timezone.utc)
 
     if args.slot_for:
+        cv_id = checked_id(args.slot_for)
         doc = json.loads(args.profiles.read_text())
-        profile = next(p for p in doc["profiles"] if p["id"] == args.slot_for)
+        profile = next((p for p in doc["profiles"] if p["id"] == cv_id), None)
+        if profile is None:
+            raise SystemExit(f"::error::no profile with id {cv_id!r} in {args.profiles}")
         slot = due_slot((profile.get("schedule") or {}).get("hours_utc") or [], now)
-        run = load_run(args.runs_dir, args.slot_for)
+        run = load_run(args.runs_dir, cv_id)
         print(json.dumps({"slot": slot.isoformat() if slot else None,
                           "attempts": attempts_for(run, slot) if slot else 0}))
         return 0

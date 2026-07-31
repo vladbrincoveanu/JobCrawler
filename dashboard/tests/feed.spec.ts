@@ -168,3 +168,38 @@ test("a run record is read per CV, and absent before the first run", async () =>
   expect((await loadRun("fullstack"))?.matches).toBe(12);
   expect(await loadRun("devops-sre")).toBeNull();
 });
+
+test("a named CV never falls back to the legacy single-CV feed", async () => {
+  // SCOUT_FEED_URL is the pre-multi-CV feed: one file, one CV. It used to be
+  // the `??` fallback for feedUrlFor(cvId), so a deployment carrying the legacy
+  // var but not SCOUT_FEED_BASE_URL served ONE CV's jobs under EVERY CV's name,
+  // with nothing in the response to say which scan it actually was.
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  await mkdir(path.join(dir, "results"), { recursive: true });
+  await writeFile(
+    path.join(dir, "results", "devops-sre.json"),
+    JSON.stringify({ cv: "devops-sre", jobs: [{ title: "SRE" }] }),
+  );
+  process.env.SCOUT_FEED_DIR = dir;
+  process.env.SCOUT_FEED_URL = "https://legacy.example/ai-agentic-latest.json";
+  delete process.env.SCOUT_FEED_BASE_URL;
+
+  const { result, origin, error } = await loadFeed("devops-sre");
+
+  expect(error).toBeNull();
+  expect(result?.cv).toBe("devops-sre");
+  expect(origin).toBe(path.join(dir, "results", "devops-sre.json"));
+  expect(origin).not.toContain("legacy.example");
+});
+
+test("a CV with no results reads as empty, not as another CV's scan", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  await mkdir(path.join(dir, "results"), { recursive: true });
+  process.env.SCOUT_FEED_DIR = dir;
+  process.env.SCOUT_FEED_URL = "https://legacy.example/ai-agentic-latest.json";
+  delete process.env.SCOUT_FEED_BASE_URL;
+
+  const { result, error } = await loadFeed("never-scanned");
+  expect(result).toBeNull();
+  expect(error).toBeNull();
+});

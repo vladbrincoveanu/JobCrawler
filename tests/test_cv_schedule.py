@@ -131,3 +131,67 @@ def test_select_due_tolerates_a_corrupt_run_file(tmp_path):
 
     assert cv_schedule.select_due(profiles, tmp_path / "runs", at(5, 30)) == \
         ["backend-streaming"]
+
+
+# --- profile ids are path components on the runner ---------------------------
+#
+# Every id these functions print is interpolated into scout/profiles/<id>.json,
+# $STATE_DIR/results/<id>.json and $RUNNER_TEMP/<id>.raw.json by scout-cron.yml.
+# The workflow quotes them, so an id was never a command injection -- but a
+# traversing id was still a write outside the state directory, and an id with a
+# newline still split into two entries in the due list. The dashboard enforces
+# this shape; a pull request against scout/profiles.json does not go through the
+# dashboard, which is why it is enforced here too.
+
+import pytest
+
+
+def _profiles(tmp_path, *ids):
+    (tmp_path / "runs").mkdir(exist_ok=True)
+    p = tmp_path / "profiles.json"
+    p.write_text(json.dumps({"version": 1, "profiles": [
+        {"id": i, "enabled": True, "schedule": {"hours_utc": [5]}} for i in ids
+    ]}))
+    return p
+
+
+@pytest.mark.parametrize("bad_id", [
+    "../../.github/workflows/scout-cron",
+    "backend\nai-agentic",
+    "Backend-Streaming",
+    "with space",
+    "a" * 41,
+    "",
+])
+def test_select_due_refuses_an_id_that_is_not_a_safe_path_component(tmp_path, bad_id):
+    profiles = _profiles(tmp_path, bad_id)
+    with pytest.raises(SystemExit):
+        cv_schedule.select_due(profiles, tmp_path / "runs", at(6))
+
+
+def test_valid_ids_still_pass(tmp_path):
+    profiles = _profiles(tmp_path, "backend-streaming", "ai-agentic")
+    assert cv_schedule.select_due(profiles, tmp_path / "runs", at(6)) == [
+        "backend-streaming", "ai-agentic",
+    ]
+
+
+def test_checked_id_rejects_non_strings():
+    with pytest.raises(SystemExit):
+        cv_schedule.checked_id(None)
+    with pytest.raises(SystemExit):
+        cv_schedule.checked_id(42)
+
+
+def test_a_missing_profile_fails_loudly_rather_than_printing_nothing(tmp_path, capsys):
+    """`eval "$(cv_schedule.py --filters-for x)"` treats an empty stdout as a
+    successful no-op, so a StopIteration traceback here would have left every
+    F_* variable unset instead of failing the step."""
+    profiles = _profiles(tmp_path, "backend-streaming")
+    argv = ["cv_schedule.py", "--profiles", str(profiles),
+            "--runs-dir", str(tmp_path / "runs"), "--filters-for", "no-such-cv"]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit):
+            cv_schedule.main()
+    assert capsys.readouterr().out.strip() == ""

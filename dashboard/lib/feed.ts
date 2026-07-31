@@ -124,7 +124,12 @@ async function loadJson<T>(
 
 /** Load one CV's feed, or the legacy single feed when no id is given. */
 export async function loadFeed(cvId?: string): Promise<FeedLoad> {
-  const url = (cvId ? feedUrlFor(cvId) : null) ?? process.env.SCOUT_FEED_URL;
+  // SCOUT_FEED_URL is the LEGACY SINGLE-CV feed, so it is only a fallback when
+  // no CV was asked for. Falling back to it for a named CV -- which is what
+  // `feedUrlFor(cvId) ?? SCOUT_FEED_URL` did -- serves one CV's jobs under
+  // another CV's name on any deployment that has the legacy var but not the
+  // per-CV base, with nothing in the response to say so.
+  const url = cvId ? feedUrlFor(cvId) : process.env.SCOUT_FEED_URL;
   const file = cvId ? feedPathFor(cvId) : feedPath();
   const { value, origin, error } = await loadJson<ScoutResult>(url, file);
   return { result: value, origin, error };
