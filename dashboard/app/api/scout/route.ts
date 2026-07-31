@@ -115,14 +115,14 @@ export async function POST(request: NextRequest) {
   // there is no python and the function is killed long before a scan finishes,
   // so it fails -- but it fails as a timeout after several minutes, which reads
   // as "my CV broke it". Refusing up front, with the reason, is the honest
-  // version. Scheduled scans are the deployed path; see /cvs.
+  // version. Scheduled scans are the deployed path; see /profiles.
   if (process.env.SCOUT_LOCAL_SCAN !== "1" && !existsSync(SCOUT_SCRIPT)) {
     return NextResponse.json(
       {
         error:
           "Upload-and-scan runs scripts/scout.py, which only exists on a local " +
           "checkout. On this deployment, scans run on GitHub Actions: configure " +
-          "a CV under /cvs and use Scan now.",
+          "a CV under /profiles and use Scan now.",
       },
       { status: 501 },
     );

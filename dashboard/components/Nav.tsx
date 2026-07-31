@@ -16,7 +16,10 @@ export function Nav() {
 
   const links: Array<{ href: string; label: string; testid: string }> = [
     { href: "/matches", label: "Matches", testid: "nav-link-matches" },
-    { href: "/cvs", label: "CVs", testid: "nav-link-cvs" },
+    // NOT /cvs: the Vercel CLI's upload filter drops directories named like VCS
+    // metadata (.git, .svn, CVS), so app/cvs/ never reached the build and the
+    // route 404'd in production while building fine locally.
+    { href: "/profiles", label: "CVs", testid: "nav-link-cvs" },
   ];
   if (hasDatabase) {
     links.unshift(

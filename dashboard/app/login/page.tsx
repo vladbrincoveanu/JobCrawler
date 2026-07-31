@@ -28,7 +28,7 @@ export default function LoginPage() {
       });
       if (res.ok) {
         setPassword("");
-        router.push("/cvs");
+        router.push("/profiles");
         router.refresh();
         return;
       }
