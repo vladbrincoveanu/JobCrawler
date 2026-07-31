@@ -71,7 +71,10 @@ def test_migrate_returns_new_versions_on_first_run(pg_base_url):
         with psycopg.connect(tmpl_url) as conn:
             applied = runner.migrate(conn, Path("crawler/storage/migrations"))
             conn.commit()
-        assert applied == [1]
+        # Every discovered migration must be applied, in ascending version order.
+        expected = sorted(v for v, _, _ in runner._discover(Path("crawler/storage/migrations")))
+        assert expected, "no migrations discovered -- fixture/path is wrong"
+        assert applied == expected
     finally:
         with psycopg.connect(admin, autocommit=True) as c:
             with c.cursor() as cur:
