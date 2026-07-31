@@ -13,6 +13,7 @@ higher than a generic Kubernetes/DevOps ad, and that gap must not depend on what
 else happened to be in the result set.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -107,3 +108,64 @@ def test_missing_fields_do_not_raise(field):
     ad[field] = None
     pct, _ = scout.match_evidence(ad, DOTNET_PROFILE)
     assert isinstance(pct, int)
+
+
+# --------------------------------------------------------------- lexicon cover
+
+# Technologies named in the candidate's own CV. build_profile_from_lexicon can
+# only extract skills that SKILL_LEXICON knows, so anything missing here is
+# silently absent from the profile: the ad can ask for it, the CV can claim it,
+# and the match still scores zero for it. MongoDB and EventStoreDB were both in
+# this state -- an event-sourcing specialist got no credit for event sourcing.
+CV_TECHNOLOGIES = [
+    ".NET", "C#", "ASP.NET", "Angular", "TypeScript", "Kafka", "Kubernetes",
+    "Helm", "Argo CD", "PostgreSQL", "SQL Server", "MongoDB", "EventStoreDB",
+    "CQRS", "event sourcing", "TeamCity", "GitHub Actions", "Azure", "Docker",
+    "microservices", "webshop", "content management",
+]
+
+
+def lexicon_hits(text: str) -> list[str]:
+    """Skill names SKILL_LEXICON finds in `text`.
+
+    Asserted against the lexicon directly, not through match_evidence: the
+    lexicon is what build_profile_from_lexicon reads a CV with, so a term
+    missing HERE never reaches any profile in the first place. Going through
+    match_evidence would instead test the sample profile below, which is a
+    fixture and would happily pass while real CVs kept losing skills.
+    """
+    return [name for pattern, (name, _) in scout.SKILL_LEXICON.items()
+            if re.search(pattern, text.lower())]
+
+
+@pytest.mark.parametrize("technology", CV_TECHNOLOGIES)
+def test_lexicon_recognises_every_technology_on_the_cv(technology):
+    assert lexicon_hits(technology), (
+        f"{technology!r} is invisible to SKILL_LEXICON: it can never enter a "
+        f"profile, so neither a CV claiming it nor an ad asking for it counts")
+
+
+def test_generic_ad_filler_matches_nothing():
+    """Guards the additions above from being written too broadly."""
+    assert lexicon_hits(
+        "Mitarbeiter (m/w/d). A motivated team player with strong "
+        "communication skills, flexible hours, a modern office and fresh fruit."
+    ) == []
+
+
+def test_document_and_relational_stores_are_separate_skills():
+    """An ad wanting MongoDB is not an ad wanting SQL Server."""
+    assert lexicon_hits("MongoDB") == ["mongodb"]
+    assert lexicon_hits("SQL Server") == ["sql"]
+
+
+def test_event_sourcing_is_scored_when_the_profile_has_it():
+    """The end-to-end point of adding it: EventStoreDB must move the number."""
+    profile = {**DOTNET_PROFILE,
+               "skills": {**DOTNET_PROFILE["skills"], "event-sourcing": 7}}
+    with_es, hits = scout.match_evidence(
+        job("Backend Engineer", "CQRS and EventStoreDB on .NET."), profile)
+    without_es, _ = scout.match_evidence(
+        job("Backend Engineer", "CQRS and EventStoreDB on .NET."), DOTNET_PROFILE)
+    assert "event-sourcing" in hits
+    assert with_es > without_es

@@ -77,16 +77,37 @@ IMMO_CONFIG = Path.home() / "Desktop" / "Startup" / "immo-scouter" / "config.jso
 SKILL_LEXICON = {
     r"\.net|dotnet": ("dotnet", 10), r"\bc#": ("csharp", 10),
     r"asp\.net": ("aspnet", 8), r"\bazure\b": ("azure", 7),
-    r"\bkafka\b": ("kafka", 6), r"kubernetes|\bk8s\b": ("kubernetes", 6),
+    r"\bkafka\b": ("kafka", 6),
+    # Helm charts are how you ship to Kubernetes, not a separate competence.
+    r"kubernetes|\bk8s\b|\bhelm\b": ("kubernetes", 6),
     r"\bdocker\b": ("docker", 4), r"microservice": ("microservices", 6),
     r"distributed system": ("distributed-systems", 7),
     r"\bangular\b": ("angular", 5), r"typescript": ("typescript", 4),
     r"\bpython\b": ("python", 5), r"\bsql\b|postgres|sql server": ("sql", 4),
     r"\bllm\b|large language model|\bgen(erative)? ?ai\b|\brag\b": ("ai-llm", 8),
     r"\baws\b": ("aws", 4), r"terraform": ("terraform", 3),
-    r"\bci/cd\b|devops": ("devops", 4), r"tech lead|team lead": ("lead", 6),
+    # Named CD/CI tools count as devops evidence rather than as separate skills:
+    # they are the same competence, and giving each its own entry would inflate
+    # the denominator in match_evidence() without adding discrimination.
+    r"\bci/cd\b|devops|argo\s?cd|argocd|teamcity|github actions|gitlab ci|jenkins":
+        ("devops", 4),
+    r"tech lead|team lead": ("lead", 6),
     r"backend|back-end": ("backend", 6),
+    # Document stores are not interchangeable with the relational `sql` entry --
+    # an ad asking for MongoDB is not asking for PostgreSQL/SQL Server, and
+    # scoring them as one skill hid whichever the candidate actually had.
+    r"\bmongo(db)?\b": ("mongodb", 5),
+    # Event sourcing is a genuine differentiator: few ads ask for it, and the
+    # ones that do are a much stronger signal than another "microservices"
+    # mention. EventStoreDB, the pattern and CQRS are one competence here.
+    r"eventstore|event[\s-]?sourcing|\bcqrs\b|event[\s-]?driven": ("event-sourcing", 7),
+    r"e-?commerce|webshop|online[\s-]?shop": ("ecommerce", 3),
+    r"content management|\bcms\b|\becm\b": ("content-management", 3),
 }
+# Deliberately NOT in the lexicon: "REST API". It appears in almost every
+# backend ad, so as a scored skill it would add a near-constant to every job's
+# match and discriminate between none of them -- diluting the signal from the
+# skills that do separate a good ad from a bad one.
 
 ROLE_TITLES = [
     ".net", "c#", "backend", "software engineer", "software developer",
