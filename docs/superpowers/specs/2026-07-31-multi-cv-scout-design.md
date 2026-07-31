@@ -31,6 +31,8 @@ alerted, switch to another, create more.
 | Alerting | Telegram, per CV | `send_telegram()` and chunking already exist |
 | Config → GitHub | UI writes files, user commits | Nothing is pushed unattended to a **public** repo |
 | Scan-now feedback | Stream per-source progress | A scan takes 30s–4m18s; a blank spinner already read as "hung" |
+| Alert credentials | Entered in the UI, written to gitignored `.env.local`; user mirrors to GitHub secrets | Public repo — a committed token is a published token; no PAT stored in the app |
+| Company reviews | Only for the published top-N matches | They are ~99% of scan runtime; reviews nobody sees are not worth paying for |
 
 ## Critical constraint: the repository is public
 
@@ -147,6 +149,39 @@ and pushes nothing**. Without this, day one is four CVs × up to 50 matches ≈ 
 Telegram messages. The dashboard still shows the full board immediately; only
 the push is suppressed, and only once per CV.
 
+### Company review budget
+
+Company review enrichment is the entire runtime cost of a scan — ~9 seconds of
+source fetching against 10+ minutes of sequential LLM calls, one per unseen
+company across all 242 scored jobs.
+
+**Rule:** enrich only the matches actually published (`filters.top`, default 50),
+never the full scored set. Reviews the user cannot see are not worth paying for.
+This cuts calls by roughly an order of magnitude and keeps the existing
+`data/company_reviews` disk cache, which makes repeat runs near-free. A cold
+four-CV cron wake stays in minutes rather than an hour.
+
+### Credentials
+
+Alert credentials (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and optionally
+`NVIDIA_API_KEY`, `ADZUNA_*`, `JOOBLE_API_KEY`) are entered in the UI when
+creating an alert, and written to **`.env.local`, which is gitignored**.
+
+This is a hard boundary. The repository is public and the config-sync model
+writes files the user then commits — a credential in any committed file is a
+published credential. `lib/cvProfiles.ts` writes `scout/`; credentials go
+through a separate writer that can only target `.env.local`, so no future edit
+can route a token into `scout/`. A test asserts that a profile write containing
+a token-shaped value fails rather than being written.
+
+Local scans and local alerts work immediately from `.env.local`. For scheduled
+runs, GitHub Actions cannot read it, so the UI displays the exact
+`gh secret set <NAME>` commands to paste. The dashboard never stores a GitHub
+token and never writes to the repository's secrets itself.
+
+Current state: `gh secret list` is empty. Nothing scheduled will run, and no
+alert will send, until those secrets are set on the repo.
+
 ### Alerting
 
 For each scanned CV: take matches with `fit >= alert.min_fit`, drop any
@@ -209,6 +244,12 @@ spinner.
 - **Dependencies:** `scout.py` (stderr), existing `/api/scout` spawn logic.
 - **Size target:** ~150 lines.
 
+### Module: `lib/credentials.ts`
+- **Responsibility:** Read and write alert credentials to `.env.local` only.
+- **Interface:** In — key/value pairs from the alert form. Out — merged `.env.local`; returns the `gh secret set` commands to mirror them to GitHub. Refuses any path outside `.env.local`.
+- **Dependencies:** `node:fs`. Deliberately shares nothing with `lib/cvProfiles`, so no edit there can route a token into the committed `scout/` tree.
+- **Size target:** ~100 lines.
+
 ### Module: `components/CvSwitcher.tsx`
 - **Responsibility:** Select the active CV; create a new one.
 - **Interface:** In — profile list, active id. Out — `onSelect`, `onCreate`.
@@ -257,6 +298,9 @@ screenshots and not "it compiles".
 - Due-check: correct hour runs, wrong hour skips, disabled skips, already-run-this-hour skips.
 - Per-CV sent-state isolation: same ad alerts on two CVs independently.
 - Quiet first run pushes nothing and records everything.
+- Company reviews are requested only for published matches, not the scored set.
+- `lib/credentials.ts` refuses to write anywhere but `.env.local`, and a
+  token-shaped value offered to a profile write is rejected, not published.
 
 Coverage gate stays at ≥90% (`--cov=crawler --cov-fail-under=90`).
 
@@ -274,9 +318,13 @@ Coverage gate stays at ≥90% (`--cov=crawler --cov-fail-under=90`).
 2. **GitHub disables scheduled workflows on public repos after 60 days without
    commits.** Silent failure: alerts simply stop. The workflow logs a heartbeat
    into `runs/` so a stale timestamp is visible on the dashboard.
-3. **Scan-time variance is unexplained** — 29.7s vs 4m18s for the same CV and
-   endpoint. Streaming will expose which source stalls; if it is karriere.at's
-   Playwright path, it may need a per-source timeout.
+3. ~~**Scan-time variance is unexplained**~~ **Measured and explained.** It is
+   not the job sources: free APIs 2.4s, karriere.at 6.6s (307 ads → 247 jobs),
+   Adzuna+Jooble 0.1s, all sources with `--no-llm` ~9s total. The same run with
+   `--company-reviews` exceeded **10 minutes**. Company review enrichment makes
+   one sequential LLM call per unseen company; the 29.7s run had a warm
+   `data/company_reviews` cache, the 4m18s run did not. Bounded by the top-N
+   rule below.
 4. **`scout/` is public.** Profiles are PII-free today, but every future field
    added there is published. Enforced by a header comment and review, not code.
 
