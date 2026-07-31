@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+
 import { getStats, listJobs, listRuns, listErrorsForRun } from "@/lib/queries";
 import { StatCard } from "@/components/StatCard";
 import { JobTable } from "@/components/JobTable";
@@ -6,6 +8,12 @@ import { RunTable } from "@/components/RunTable";
 export const dynamic = "force-dynamic";
 
 export default async function OverviewPage() {
+  // Everything below queries PostgreSQL. The deployment has none, and pg does
+  // not fail fast on an unreachable host -- it hangs until the request times
+  // out, which reads as "the site is down" rather than "this page needs a
+  // database". /matches is the home page wherever there is no crawler DB.
+  if (!process.env.DATABASE_URL) redirect("/matches");
+
   const stats = await getStats();
   const recentJobs = (await listJobs({ limit: 10 })).jobs;
   const recentRuns = await listRuns(5);

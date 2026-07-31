@@ -62,7 +62,7 @@ export default defineConfig({
     // is neither known nor safe to overwrite.
     command:
       `npx next build && DATABASE_URL=${TEST_DATABASE_URL} ` +
-      `SCOUT_FEED_PATH=${FEED_FIXTURE} ` +
+      `SCOUT_FEED_PATH=${FEED_FIXTURE} SCOUT_LOCAL_SCAN=1 ` +
       `npx next start --port ${PORT}`,
     // Readiness is probed on /scout, NOT on "/". The overview page queries
     // PostgreSQL while rendering, and with no database running that request
