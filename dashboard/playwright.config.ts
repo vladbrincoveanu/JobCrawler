@@ -46,7 +46,12 @@ export default defineConfig({
 
   globalSetup: require("node:path").resolve(__dirname, "tests/global-setup.ts"),
 
-  webServer: {
+  // The lib specs (cv-profiles, credentials, feed) are pure Node: they call
+  // filesystem helpers directly and never open a page. Booting Next for them
+  // costs a two-minute build, and in a sandbox that forbids listen(2) it fails
+  // outright -- which reported as "0 tests ran", not as an error. PW_NO_SERVER=1
+  // runs them against no server at all.
+  webServer: process.env.PW_NO_SERVER ? undefined : {
     // `next start` needs a build, and the suite previously assumed one already
     // existed -- on a clean checkout it just timed out waiting for a server that
     // could never boot. Building here also means a broken build fails the test
