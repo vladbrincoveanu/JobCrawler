@@ -1,40 +1,38 @@
 name: scout-cron
 
-# Scheduled CV-matched job scan.
+# Hourly multi-CV job scan.
 #
-# Runs scripts/scout.py against the sources this project is actually allowed to
-# use -- the free no-auth job APIs, karriere.at, and Adzuna/Jooble when their
-# keys are configured -- and publishes the ranked result as JSON. The dashboard
-# reads that JSON on /matches, so the page has jobs in it without anyone
-# uploading a CV first.
+# Every wake asks scripts/cv_schedule.py which CV profiles are due, scans each
+# one sequentially against its committed profile, publishes per-CV results to
+# the scout-data orphan branch, and alerts on Telegram via scripts/alerts.py.
 #
-# The CV never lives in this repository. It is passed in as the CV_PDF_BASE64
-# secret and only ever exists on the runner, in a file deleted with the runner.
+# No CV PDF is involved. The runner reads scout/profiles/<id>.json -- ~600 bytes
+# of {skills, role_titles, source} -- which is why there is no CV_PDF_BASE64
+# secret any more: Actions secrets cap at 48 KB and these CVs are ~76 KB base64
+# (gzip does not help, PDFs are already compressed).
 #
-# Setup (one time):
-#   base64 -i /path/to/cv.pdf | pbcopy       # macOS; use `base64 -w0` on Linux
-#   gh secret set CV_PDF_BASE64              # paste
-# Optional secrets: NVIDIA_API_KEY (LLM profile/rerank + company reviews),
-#   ADZUNA_APP_ID + ADZUNA_APP_KEY, JOOBLE_KEY.
+# No --company-reviews either. Enrichment is one sequential LLM call per unseen
+# company against a data/company_reviews/ cache that is gitignored, so a runner
+# is always cold: a measured 4m18s-to-10min per scan, paid again every wake,
+# with no way for the result to reach the local dashboard once it is stripped
+# from the published feed. Reviews run locally, where the cache lives.
+#
+# Required secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID.
+# Optional: NVIDIA_API_KEY (LLM rerank), ADZUNA_APP_ID + ADZUNA_APP_KEY,
+#           JOOBLE_KEY.
 
 on:
   schedule:
-    # 05:30 UTC daily — before the Vienna working day, after most boards have
-    # published the previous evening's ads.
-    - cron: "30 5 * * *"
+    # Hourly. WHICH CVs actually run is decided by cv_schedule.py against each
+    # profile's hours_utc, not by this cron line.
+    - cron: "7 * * * *"
   workflow_dispatch:
     inputs:
-      days:
-        description: "Only ads posted within this many days"
-        default: "7"
-      top:
-        description: "How many matches to publish"
-        default: "50"
-      sources:
-        description: "Comma-separated sources (apis,karriere,adzuna,jooble,stepstone)"
-        default: "apis,karriere,adzuna,jooble"
-      require_salary:
-        description: "Drop ads that state no salary"
+      cv_id:
+        description: "Scan only this CV id, ignoring its schedule (blank = whatever is due)"
+        default: ""
+      force:
+        description: "Ignore the due-check and scan every enabled CV"
         type: boolean
         default: false
 
@@ -48,19 +46,18 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    # A full scan is minutes, not seconds (karriere.at is rate-limited to about
-    # one request a second on purpose). This cap is a runaway guard, not a
-    # target.
+    # Four sequential scans at roughly a minute each, plus checkout and publish.
+    # A runaway guard, not a target.
     timeout-minutes: 45
     env:
       FEED_BRANCH: scout-data
-      SCOUT_DAYS: ${{ inputs.days || '7' }}
-      SCOUT_TOP: ${{ inputs.top || '50' }}
-      SCOUT_SOURCES: ${{ inputs.sources || 'apis,karriere,adzuna,jooble' }}
+      STATE_DIR: ${{ github.workspace }}/.feed
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
       ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
       JOOBLE_KEY: ${{ secrets.JOOBLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - uses: actions/checkout@v4
@@ -75,112 +72,176 @@ jobs:
         # neither of which this job touches.
         run: pip install requests duckdb pypdf
 
-      - name: Materialise the CV from the secret
-        env:
-          CV_PDF_BASE64: ${{ secrets.CV_PDF_BASE64 }}
+      - name: Fetch the current feed state
+        # The branch holds results/, sent/ and runs/. Unpacked into $STATE_DIR so
+        # the working tree stays on the default branch while scanning.
         run: |
           set -euo pipefail
-          if [ -z "${CV_PDF_BASE64:-}" ]; then
-            echo "::error::CV_PDF_BASE64 secret is not set. Without a CV there is" \
-                 "nothing to match against. Run: base64 -w0 cv.pdf | gh secret set CV_PDF_BASE64"
-            exit 1
-          fi
-          printf '%s' "$CV_PDF_BASE64" | base64 -d > "$RUNNER_TEMP/cv.pdf"
-          # A truncated or wrongly-encoded secret decodes to something that is
-          # not a PDF; catch that here rather than as an opaque pypdf traceback.
-          if [ "$(head -c 5 "$RUNNER_TEMP/cv.pdf")" != "%PDF-" ]; then
-            echo "::error::CV_PDF_BASE64 did not decode to a PDF (no %PDF- header)."
-            exit 1
-          fi
-          echo "CV decoded: $(wc -c < "$RUNNER_TEMP/cv.pdf") bytes"
-
-      - name: Scan job sources
-        run: |
-          set -euo pipefail
-          ARGS=(--dry-run
-                --cv "$RUNNER_TEMP/cv.pdf"
-                --sources "$SCOUT_SOURCES"
-                --days "$SCOUT_DAYS"
-                --top "$SCOUT_TOP"
-                --json-out data/scout/latest.json)
-          if [ "${{ inputs.require_salary }}" = "true" ]; then
-            ARGS+=(--require-salary)
-          fi
-          # The LLM steps (profile extraction, rerank, employer pros/cons) are
-          # all gated on the same key. With no key the run still works: scoring
-          # falls back to the keyword lexicon and no review panels are produced.
-          if [ -n "${NVIDIA_API_KEY:-}" ]; then
-            ARGS+=(--company-reviews)
-          else
-            ARGS+=(--no-llm)
-            echo "::notice::NVIDIA_API_KEY not set — keyword scoring, no company reviews."
-          fi
-          python scripts/scout.py "${ARGS[@]}"
-
-      - name: Summarise the scan
-        run: |
-          set -euo pipefail
-          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, pathlib
-          d = json.loads(pathlib.Path("data/scout/latest.json").read_text())
-          jobs = d["jobs"]
-          with_salary = sum(1 for j in jobs if j.get("salary"))
-          reviewed = sum(1 for j in jobs if j.get("company_review"))
-          print(f"## {len(jobs)} matches published")
-          print(f"- {d['total_matches']} scored, top {len(jobs)} published")
-          print(f"- profile source: {d.get('profile_source')}")
-          print(f"- {with_salary} state a salary · {reviewed} have employer pros/cons")
-          print("")
-          print("| Match | Title | Company | Posted |")
-          print("|---|---|---|---|")
-          for j in jobs[:10]:
-              print(f"| {j.get('match_pct')}% | {j.get('title')} | "
-                    f"{j.get('company')} | {j.get('posted') or '—'} |")
-          PY
-
-      - name: Upload the scan as an artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: scout-latest
-          path: data/scout/latest.json
-          retention-days: 30
-
-      - name: Publish the feed to the ${{ env.FEED_BRANCH }} branch
-        run: |
-          set -euo pipefail
-          STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-          PUB=$(mktemp -d)
-          cp data/scout/latest.json "$PUB/latest.json"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # The feed lives on its own branch, never on the default branch: a
-          # daily commit of generated JSON would otherwise churn the history
-          # every consumer of this repo has to read.
+          mkdir -p "$STATE_DIR"
           if git ls-remote --exit-code --heads origin "$FEED_BRANCH" >/dev/null 2>&1; then
             git fetch --depth=1 origin "$FEED_BRANCH"
             # FETCH_HEAD, not origin/$FEED_BRANCH: actions/checkout configures a
             # narrow fetch refspec for the branch it checked out, so fetching a
-            # second branch never creates its remote-tracking ref. Using
-            # origin/$FEED_BRANCH fails with "not a commit" on every run after
-            # the first -- the orphan-create path works, the update path does not.
+            # second branch never creates its remote-tracking ref. This was
+            # verified broken -- the orphan-create path worked and every run
+            # after the first died with "not a commit".
+            git archive FETCH_HEAD | tar -x -C "$STATE_DIR"
+            echo "feed state restored: $(find "$STATE_DIR" -name '*.json' | wc -l) files"
+          else
+            echo "::notice::$FEED_BRANCH does not exist yet; first run"
+          fi
+          mkdir -p "$STATE_DIR/results" "$STATE_DIR/sent" "$STATE_DIR/runs"
+
+      - name: Decide which CVs are due
+        id: due
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.force }}" = "true" ]; then
+            DUE=$(python scripts/cv_schedule.py \
+              --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs" --all-enabled)
+          elif [ -n "${{ inputs.cv_id }}" ]; then
+            DUE="${{ inputs.cv_id }}"
+          else
+            DUE=$(python scripts/cv_schedule.py \
+              --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs")
+          fi
+          # The ids go to a FILE, and only a count goes to the step output. Ids
+          # come from scout/profiles.json, which anyone can propose a change to;
+          # interpolating "${{ steps.due.outputs.due }}" into a later `run:`
+          # block would make a crafted id run as shell. The file is read with
+          # `while read`, which never evaluates its content.
+          printf '%s\n' "$DUE" | sed '/^$/d' > "$STATE_DIR/due.txt"
+          echo "count=$(wc -l < "$STATE_DIR/due.txt" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "due: ${DUE:-(none)}"
+
+      - name: Scan, publish and alert each due CV
+        if: steps.due.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          echo "## scout-cron $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CV | Status | Published | Alerted |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          while read -r CV_ID; do
+            [ -n "$CV_ID" ] || continue
+
+            SLOT_JSON=$(python scripts/cv_schedule.py \
+              --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs" \
+              --slot-for "$CV_ID")
+            SLOT=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["slot"])' "$SLOT_JSON")
+            ATTEMPTS=$(python -c 'import json,sys; print(json.loads(sys.argv[1])["attempts"])' "$SLOT_JSON")
+
+            # Filters come out of Python already shell-quoted. Not an inline
+            # heredoc: a heredoc terminator inside a YAML block scalar is
+            # indentation-sensitive in a way that is easy to get subtly wrong,
+            # and this way the parsing is covered by tests.
+            eval "$(python scripts/cv_schedule.py \
+              --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs" \
+              --filters-for "$CV_ID")"
+
+            ARGS=(--dry-run
+                  --profile "scout/profiles/$CV_ID.json"
+                  --sources "$F_SOURCES"
+                  --days "$F_DAYS"
+                  --top "$F_TOP"
+                  --json-out "$RUNNER_TEMP/$CV_ID.raw.json")
+            # if/then, not `[ ... ] && ARGS+=(...)`: under `set -e` a bare test
+            # that fails IS the last command of the line and the whole job exits,
+            # silently skipping every remaining CV.
+            if [ -n "$F_REQUIRE_SALARY" ]; then
+              ARGS+=(--require-salary)
+            fi
+            # No --company-reviews, ever: see the header comment.
+            if [ -z "${NVIDIA_API_KEY:-}" ]; then
+              ARGS+=(--no-llm)
+            fi
+
+            STATUS=ok
+            python scripts/scout.py "${ARGS[@]}" || STATUS=error
+            FINISHED=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+            ALERTED=0
+
+            if [ "$STATUS" = "ok" ]; then
+              COUNT=$(python scripts/publish.py results \
+                --src "$RUNNER_TEMP/$CV_ID.raw.json" \
+                --dst "$STATE_DIR/results/$CV_ID.json")
+              # Results are written before any push is attempted: a Telegram
+              # outage must not cost the scan.
+              if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+                if python scripts/alerts.py \
+                     --results "$STATE_DIR/results/$CV_ID.json" \
+                     --sent "$STATE_DIR/sent/$CV_ID.json" \
+                     --min-match "$F_MIN_MATCH"; then
+                  ALERTED=1
+                else
+                  echo "::warning::alerting failed for $CV_ID; results kept"
+                  STATUS=error
+                fi
+              else
+                echo "::warning::TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID unset — no alerts sent"
+              fi
+            else
+              COUNT=0
+              echo "::error::scan failed for $CV_ID"
+            fi
+
+            python scripts/publish.py run \
+              --path "$STATE_DIR/runs/$CV_ID.json" \
+              --slot "$SLOT" --status "$STATUS" --attempts "$ATTEMPTS" \
+              --matches "$COUNT" --finished-at "$FINISHED"
+
+            echo "| $CV_ID | $STATUS | $COUNT | $ALERTED |" >> "$GITHUB_STEP_SUMMARY"
+          done < "$STATE_DIR/due.txt"
+
+      - name: Publish the state to the ${{ env.FEED_BRANCH }} branch
+        if: steps.due.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "$FEED_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$FEED_BRANCH"
             git checkout -B "$FEED_BRANCH" FETCH_HEAD
           else
             git checkout --orphan "$FEED_BRANCH"
             git rm -rf --cached . >/dev/null 2>&1 || true
           fi
 
-          mkdir -p scout/history
-          cp "$PUB/latest.json" scout/latest.json
-          cp "$PUB/latest.json" "scout/history/$STAMP.json"
-          git add scout/latest.json "scout/history/$STAMP.json"
-          # Nothing to commit is a legitimate outcome (a re-run within the same
-          # minute), not a failure.
+          # Explicit paths only, never `git add .`: the working tree still holds
+          # the default branch's files, including scout/profiles.json, which must
+          # not be duplicated onto the data branch.
+          mkdir -p results sent runs
+          cp -r "$STATE_DIR"/results/. results/ 2>/dev/null || true
+          cp -r "$STATE_DIR"/sent/. sent/ 2>/dev/null || true
+          cp -r "$STATE_DIR"/runs/. runs/ 2>/dev/null || true
+          git add results sent runs
+
+          # Deprecated single-CV feed, kept one release so anything still pointed
+          # at scout/latest.json (docker-compose, an old bookmark) does not break
+          # mid-migration. Remove once SCOUT_FEED_BASE_URL is everywhere.
+          FIRST=$(ls results/*.json 2>/dev/null | head -1 || true)
+          if [ -n "$FIRST" ]; then
+            mkdir -p scout
+            cp "$FIRST" scout/latest.json
+            git add scout/latest.json
+          fi
+
           git commit -m "chore(scout): scan $STAMP" || {
             echo "::notice::feed unchanged; nothing committed"; exit 0;
           }
           git push origin "$FEED_BRANCH"
 
-          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${FEED_BRANCH}/scout/latest.json"
-          echo "Feed: $RAW" >> "$GITHUB_STEP_SUMMARY"
+          RAW="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${FEED_BRANCH}"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Feed base: $RAW" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Nothing due
+        # GitHub disables scheduled workflows on public repos after 60 days with
+        # no commits, silently -- alerts would simply stop. The run records on
+        # the feed branch are what make that visible on the dashboard, since a
+        # stale newest timestamp is the symptom.
+        if: steps.due.outputs.count == '0'
+        run: echo "::notice::no CV due this hour"
