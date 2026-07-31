@@ -1,9 +1,9 @@
 import { test, expect } from "@playwright/test";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { loadFeed } from "../lib/feed";
+import { loadFeed, loadRun, feedUrlFor, runUrlFor } from "../lib/feed";
 
 /**
  * loadFeed's failure modes, which /matches renders very differently and which
@@ -22,6 +22,8 @@ test.afterEach(() => {
   if (ORIGINAL === undefined) delete process.env.SCOUT_FEED_PATH;
   else process.env.SCOUT_FEED_PATH = ORIGINAL;
   delete process.env.SCOUT_FEED_URL;
+  delete process.env.SCOUT_FEED_DIR;
+  delete process.env.SCOUT_FEED_BASE_URL;
 });
 
 test("a missing feed is an empty state, not an error", async () => {
@@ -79,4 +81,90 @@ test("SCOUT_FEED_URL takes priority over the local file", async () => {
   const { result, origin } = await loadFeed();
   expect(result).toBeNull();
   expect(origin).toBe("http://127.0.0.1:9/unreachable.json");
+});
+
+// --- per-CV feeds -----------------------------------------------------------
+
+test("loads a per-CV feed from the state directory", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  await mkdir(path.join(dir, "results"), { recursive: true });
+  await writeFile(
+    path.join(dir, "results", "backend-streaming.json"),
+    JSON.stringify({
+      generated_at: "2026-07-31T05:10:00",
+      cv: "backend-streaming",
+      total_matches: 1,
+      jobs: [{ title: "T" }],
+    }),
+  );
+  process.env.SCOUT_FEED_DIR = dir;
+
+  const { result, error } = await loadFeed("backend-streaming");
+  expect(error).toBeNull();
+  expect(result?.jobs).toHaveLength(1);
+});
+
+test("a missing per-CV feed is an empty state, not an error", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  process.env.SCOUT_FEED_DIR = dir;
+
+  const { result, error } = await loadFeed("never-scanned");
+  expect(result).toBeNull();
+  expect(error).toBeNull();
+});
+
+test("one CV's feed is never served for another CV", async () => {
+  // The id addresses the file; if it were ignored anywhere in the lookup the
+  // switcher would show four identical boards and nobody would notice for days.
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  await mkdir(path.join(dir, "results"), { recursive: true });
+  await writeFile(
+    path.join(dir, "results", "devops-sre.json"),
+    JSON.stringify({ jobs: [{ title: "sre" }] }),
+  );
+  process.env.SCOUT_FEED_DIR = dir;
+
+  expect((await loadFeed("devops-sre")).result?.jobs).toHaveLength(1);
+  expect((await loadFeed("fullstack")).result).toBeNull();
+});
+
+test("SCOUT_FEED_BASE_URL builds the per-CV URLs", () => {
+  process.env.SCOUT_FEED_BASE_URL = "https://raw.example/repo/scout-data";
+  expect(feedUrlFor("backend-streaming")).toBe(
+    "https://raw.example/repo/scout-data/results/backend-streaming.json",
+  );
+  expect(runUrlFor("backend-streaming")).toBe(
+    "https://raw.example/repo/scout-data/runs/backend-streaming.json",
+  );
+});
+
+test("a trailing slash on the base URL does not produce a double slash", () => {
+  process.env.SCOUT_FEED_BASE_URL = "https://raw.example/repo/scout-data/";
+  expect(feedUrlFor("x")).toBe("https://raw.example/repo/scout-data/results/x.json");
+});
+
+test("a CV id with a path separator is refused", () => {
+  expect(() => feedUrlFor("../../secrets")).toThrow(/Invalid CV id/);
+  // ...including when no base URL is set, where the id would otherwise reach
+  // the filesystem path builder unchecked.
+  expect(() => feedUrlFor("a/b")).toThrow(/Invalid CV id/);
+});
+
+test("a run record is read per CV, and absent before the first run", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "feed-"));
+  await mkdir(path.join(dir, "runs"), { recursive: true });
+  await writeFile(
+    path.join(dir, "runs", "fullstack.json"),
+    JSON.stringify({
+      slot: "2026-07-31T05",
+      status: "ok",
+      attempts: 1,
+      matches: 12,
+      finished_at: "2026-07-31T05:12:00Z",
+    }),
+  );
+  process.env.SCOUT_FEED_DIR = dir;
+
+  expect((await loadRun("fullstack"))?.matches).toBe(12);
+  expect(await loadRun("devops-sre")).toBeNull();
 });
