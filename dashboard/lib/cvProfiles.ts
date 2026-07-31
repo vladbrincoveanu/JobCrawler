@@ -55,6 +55,12 @@ export function validateProfile(p: CvProfile): CvProfile {
   if (typeof p.label !== "string" || p.label.trim() === "") {
     throw new Error(`Profile ${p.id}: label is required.`);
   }
+  // The gate below covers the profile DOCUMENT; profiles.json is committed to
+  // the same public repository and its label is free text straight from the
+  // form, so it gets the same scan. The id is shape-limited already, but a run
+  // of digits still passes CV_ID_RE and still reads as a phone number.
+  scanForPii(`profile id "${p.id}"`, p.id);
+  scanForPii(`label of profile ${p.id}`, p.label);
   if (typeof p.enabled !== "boolean") {
     throw new Error(`Profile ${p.id}: enabled must be a boolean.`);
   }

